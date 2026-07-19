@@ -1,0 +1,657 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
+@import "tailwindcss";
+
+/* ─── Design Tokens ─────────────────────────────────────────────────────── */
+@theme {
+  --font-sans: "JetBrains Mono", "Courier New", monospace;
+  --font-mono: "JetBrains Mono", "Courier New", monospace;
+  --font-display: "JetBrains Mono", "Courier New", monospace;
+
+  --color-yellow: #F7FD04;
+  --color-yellow-hover: #DFFE00;
+  --color-yellow-muted: #FAFFA0;
+  --color-black: #0A0A0A;
+  --color-white: #FFFFFF;
+  --color-white-off: #F8F8F8;
+  --color-sold: #FF3B30;
+  --color-sold-bg: #FFF0EE;
+  --color-available: #34C759;
+
+  /* shadcn bridge — shadcn reads these CSS vars at runtime */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-fg: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-fg: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-fg: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --color-card: var(--card);
+  --color-card-fg: var(--card-foreground);
+  --color-destructive: var(--destructive);
+
+  --tracking-mega: 0.3em;
+  --tracking-widest: 0.2em;
+  --tracking-wider: 0.1em;
+  --tracking-wide: 0.05em;
+
+  --shadow-card: 2px 2px 0px 0px #0A0A0A;
+  --shadow-card-hover: 4px 4px 0px 0px #0A0A0A;
+  --shadow-yellow: 2px 2px 0px 0px #F7FD04;
+  --shadow-yellow-hover: 4px 4px 0px 0px #F7FD04;
+
+  --spacing-header: 3.5rem;
+
+  --animate-slide-up: slide-up 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+  --animate-slide-down: slide-down 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+  --animate-fade-in: fade-in 0.2s ease-out;
+  --animate-scale-in: scale-in 0.2s ease-out;
+  --animate-marquee: marquee 20s linear infinite;
+
+  @keyframes slide-up {
+    from {
+      transform: translateY(100%);
+      opacity: 0;
+    }
+
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes slide-down {
+    from {
+      transform: translateY(-100%);
+      opacity: 0;
+    }
+
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes scale-in {
+    from {
+      transform: scale(0.96);
+      opacity: 0;
+    }
+
+    to {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+
+  @keyframes marquee {
+    from {
+      transform: translateX(0%);
+    }
+
+    to {
+      transform: translateX(-50%);
+    }
+  }
+}
+
+/* ─── shadcn CSS variables (what shadcn components read at runtime) ──────── */
+/* These use OKLCH — shadcn's default token format. Tailwind v4 understands   */
+/* OKLCH natively so no conversion needed.                                    */
+:root {
+  --background: oklch(1 0 0);
+  /* white */
+  --foreground: oklch(0.145 0 0);
+  /* near-black */
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.97 0.21 109);
+  /* #F7FD04 brand yellow */
+  --primary-foreground: oklch(0.145 0 0);
+  /* black on yellow */
+  --secondary: oklch(0.97 0 0);
+  /* off-white */
+  --secondary-foreground: oklch(0.145 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  /* grey */
+  --accent: oklch(0.97 0.21 109);
+  /* yellow */
+  --accent-foreground: oklch(0.145 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  /* red */
+  --border: oklch(0.145 0 0);
+  /* black borders */
+  --input: oklch(0.145 0 0);
+  --ring: oklch(0.97 0.21 109);
+  /* yellow focus ring */
+  --radius: 0.125rem;
+  /* 2px — sharp, minimal */
+}
+
+/* ─── Base ──────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  width: 100vw;
+  background-color: #ffffff;
+  color: #0A0A0A;
+  font-family: "JetBrains Mono", "Courier New", monospace;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+  font-feature-settings: "liga" 0;
+}
+
+
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 1.1;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+}
+
+::selection {
+  background-color: #F7FD04;
+  color: #0A0A0A;
+}
+
+*:focus {
+  outline: none;
+}
+
+*:focus-visible {
+  outline: 2px solid #F7FD04;
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F8F8F8;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #0A0A0A;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #F7FD04;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+
+
+/* ─── Component classes ─────────────────────────────────────────────────── */
+@layer components {
+
+  .header-bar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    width: 100vw;
+    background-color: #F7FD04;
+    height: var(--spacing-header);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-inline: 1rem;
+    /* border-bottom: 1px solid #0A0A0A; */
+
+    /* =========================================
+   Custom Animated Hamburger Navbar Toggle
+   ========================================= */
+
+    .custom-toggler {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      padding: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      /* Ensures the button stays clickable above the mobile menu */
+      z-index: 10000;
+    }
+
+    .custom-toggler:focus {
+      outline: none;
+    }
+
+    .toggler-icon {
+      width: 24px;
+      height: 2px;
+      background-color: #000;
+      /* Center line */
+      position: relative;
+      transition: all 300ms linear;
+      display: block;
+    }
+
+    .toggler-icon:before,
+    .toggler-icon:after {
+      content: '';
+      position: absolute;
+      width: 24px;
+      height: 2px;
+      background-color: #000;
+      /* Top and bottom lines */
+      left: 0;
+      transition: all 300ms linear;
+    }
+
+    .toggler-icon:before {
+      top: -8px;
+    }
+
+    .toggler-icon:after {
+      top: 8px;
+    }
+
+    /* Open State (Transforms into an X) */
+    .custom-toggler.open .toggler-icon {
+      background-color: transparent;
+      /* Hides the middle line */
+    }
+
+    .custom-toggler.open .toggler-icon:before {
+      transform: translateY(8px) rotate(45deg);
+    }
+
+    .custom-toggler.open .toggler-icon:after {
+      transform: translateY(-8px) rotate(-45deg);
+    }
+  }
+
+
+  /* Hide mobile burger layout entirely on tablet/desktop viewports */
+  @media (min-width: 768px) {
+    .custom-toggler {
+      display: none !important;
+    }
+
+    .space-y-\[-16px\]>div>div:hover {
+      transform: rotate(var(--desktop-tilt, -3deg)) scale(1.03) !important;
+    }
+
+    .patch-element {
+      left: var(--patch-md-left);
+      bottom: var(--patch-md-bottom);
+      width: var(--patch-md-width);
+    }
+
+
+  }
+
+  .patch-element {
+    left: var(--patch-left);
+    bottom: var(--patch-bottom);
+    width: var(--patch-width);
+  }
+
+
+  /* ////////////////////////////////////////////////////////////// */
+
+  .brand-wordmark {
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 900;
+    font-size: 1.125rem;
+    color: #0A0A0A;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .product-card {
+    position: relative;
+    background: #FFFFFF;
+    border: 1px solid #0A0A0A;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 150ms ease, box-shadow 150ms ease;
+    box-shadow: var(--shadow-card);
+  }
+
+  .product-card:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: var(--shadow-card-hover);
+  }
+
+  .product-image-wrapper {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    background-color: #F8F8F8;
+    aspect-ratio: 3 / 4;
+  }
+
+  .status-badge {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    z-index: 10;
+    padding: 0.125rem 0.5rem;
+    font-size: 0.625rem;
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    border: 1px solid #0A0A0A;
+  }
+
+  .status-badge--sold {
+    background: #FF3B30;
+    color: white;
+  }
+
+  .status-badge--available {
+    background: #F7FD04;
+    color: #0A0A0A;
+  }
+
+  .section-heading {
+    font-size: clamp(1.875rem, 5vw, 2.25rem);
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.3em;
+    text-align: center;
+    margin-bottom: 0.25rem;
+  }
+
+  .section-heading-divider {
+    width: 100%;
+    height: 1px;
+    background-color: #0A0A0A;
+    margin-bottom: 2rem;
+  }
+
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #F7FD04;
+    color: #0A0A0A;
+    border: 1px solid #0A0A0A;
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 700;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 0.75rem 1.5rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: transform 100ms ease, box-shadow 100ms ease;
+    box-shadow: var(--shadow-card);
+  }
+
+  .btn-primary:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: var(--shadow-card-hover);
+  }
+
+  .btn-primary:active {
+    transform: translate(2px, 2px);
+    box-shadow: none;
+  }
+
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #FFFFFF;
+    color: #0A0A0A;
+    border: 1px solid #0A0A0A;
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 700;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 0.75rem 1.5rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: transform 100ms ease, box-shadow 100ms ease, background-color 100ms ease;
+    box-shadow: var(--shadow-card);
+  }
+
+  .btn-secondary:hover {
+    background-color: #F7FD04;
+    transform: translate(-1px, -1px);
+    box-shadow: var(--shadow-card-hover);
+  }
+
+  .fab {
+    position: fixed;
+    bottom: 1.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 50;
+    width: 3.5rem;
+    height: 3.5rem;
+    border-radius: 9999px;
+    background-color: #F7FD04;
+    border: 2px solid #0A0A0A;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: transform 150ms ease, box-shadow 150ms ease;
+    box-shadow: 3px 3px 0px 0px #0A0A0A;
+  }
+
+  .fab:hover {
+    box-shadow: 5px 5px 0px 0px #0A0A0A;
+    transform: translateX(-50%) translate(-1px, -1px);
+  }
+
+  .bottom-sheet {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 50;
+    background: #FFFFFF;
+    border-top: 2px solid #0A0A0A;
+    animation: var(--animate-slide-up);
+    max-height: 75vh;
+    overflow-y: auto;
+  }
+
+  .category-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1rem;
+    border: 1px solid #0A0A0A;
+    background: #FFFFFF;
+    cursor: pointer;
+    aspect-ratio: 1;
+    transition: transform 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+    box-shadow: var(--shadow-card);
+  }
+
+  .category-card:hover,
+  .category-card--active {
+    background-color: #F7FD04;
+    transform: translate(-1px, -1px);
+    box-shadow: var(--shadow-card-hover);
+  }
+
+  .price-current {
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 900;
+    font-size: 1.25rem;
+    color: #0A0A0A;
+    letter-spacing: -0.02em;
+  }
+
+  .price-original {
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 400;
+    font-size: 0.875rem;
+    color: oklch(0.556 0 0);
+    text-decoration: line-through;
+  }
+
+  .input-flat {
+    width: 100%;
+    background: #FFFFFF;
+    border: 1px solid #0A0A0A;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.875rem;
+    color: #0A0A0A;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.75rem;
+    transition: border-color 100ms ease;
+  }
+
+  .input-flat:focus {
+    border-color: #F7FD04;
+    outline: none;
+  }
+
+  .marquee-track {
+    display: flex;
+    white-space: nowrap;
+    overflow: hidden;
+    border-top: 1px solid #0A0A0A;
+    border-bottom: 1px solid #0A0A0A;
+    background-color: #F7FD04;
+    padding-block: 0.5rem;
+  }
+
+  .marquee-content {
+    display: flex;
+    animation: var(--animate-marquee);
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 700;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #0A0A0A;
+  }
+
+  .outfit-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .outfit-stack-item {
+    position: relative;
+    width: 100%;
+    margin-top: -15%;
+  }
+
+  .outfit-stack-item:first-child {
+    margin-top: 0;
+  }
+}
+
+/* ─── Utilities ─────────────────────────────────────────────────────────── */
+@layer utilities {
+  .container-app {
+    width: 100%;
+    max-width: 1280px;
+    margin-inline: auto;
+    padding-inline: 1rem;
+  }
+
+  @media (min-width: 640px) {
+    .container-app {
+      padding-inline: 1.5rem;
+    }
+  }
+
+  .uppercase-tracked {
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .no-drag {
+    -webkit-user-drag: none;
+    user-select: none;
+  }
+
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  .sold-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(10, 10, 10, 0.4);
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
