@@ -110,9 +110,35 @@ export default defineSchema({
     blurDataUrl: v.optional(v.string()),
     width:      v.number(),   // Original upload dimensions
     height:     v.number(),
+
+    // ──────────────────────────────────────────────────────────────────────
+    // EDITOR / CUSTOMISATION VIEW FIELDS (all optional — most product photos
+    // are just merchandising shots and never touch the editor).
+    //
+    // Marking a photo isEditorView=true turns it into a customisable "side"
+    // in the design editor. A product can have as many editor views as it
+    // needs — a T-shirt needs front+back, a cap needs
+    // front+back+left+right+top. Just upload more photos and tag them.
+    //
+    // maxWidthMm/maxHeightMm is the ACTUAL maximum width/height of the
+    // garment AS POSED in this exact photo (e.g. full sleeve-to-sleeve
+    // spread for a tee, max folded width for a hoodie, max width across
+    // for a cap) — measured by hand before the shot. Because every photo
+    // is taken with the same camera at the same distance, dividing this
+    // photo's own pixel width by maxWidthMm gives an accurate, self
+    // -calibrating pixels-per-millimetre value with no separate
+    // calibration step required.
+    // ──────────────────────────────────────────────────────────────────────
+    isEditorView:    v.optional(v.boolean()),
+    editorViewSlug:  v.optional(v.string()),   // "front" | "back" | "left" | "right" | "top" | "bottom" | custom
+    editorViewLabel: v.optional(v.string()),   // "Cap Top" — shown as a tab in the editor
+    editorSortOrder: v.optional(v.number()),   // tab order, independent of gallery sortOrder
+    maxWidthMm:      v.optional(v.number()),
+    maxHeightMm:     v.optional(v.number()),
   })
     .index("by_product",          ["productId"])
-    .index("by_product_primary",  ["productId", "isPrimary"]),
+    .index("by_product_primary",  ["productId", "isPrimary"])
+    .index("by_product_editor_view", ["productId", "isEditorView"]),
 
   // ──────────────────────────────────────────────────────────────────────────
   // ACCESSORIES
@@ -167,8 +193,14 @@ export default defineSchema({
   // Created when a user opens the editor for a product.
   // Stores the exact position of every accessory on the garment.
   //
-  // Key design decision: positions are stored as PERCENTAGES (0–100),
-  // not pixels. This means the design looks correct on any screen size.
+  // Key design decision: positions are stored in MILLIMETRES, relative to a
+  // fixed origin on the garment (its own photo's top-left), not as a
+  // percentage of on-screen canvas pixels. This is what makes an accessory's
+  // position and size device-independent: the same design looks identical
+  // on a phone or a monitor, because the underlying number never changes —
+  // only the on-screen zoom/pan window onto it does. It's also what lets us
+  // scale accessories to their true physical size (see product_images and
+  // accessories.widthMm/heightMm).
   // ──────────────────────────────────────────────────────────────────────────
   custom_designs: defineTable({
     userId:     v.string(),         // Clerk user ID
@@ -179,18 +211,25 @@ export default defineSchema({
       v.literal("in_wardrobe"),  // Added to wardrobe
       v.literal("ordered")       // Part of a completed order
     ),
-    // Placement: where each accessory sits on the garment
-    // We store the full canvas state for each face so the editor
-    // can perfectly reconstruct the design if the user returns.
+    // Placement: where each accessory sits on a specific garment view
+    // (e.g. front / back / left / right / cap-top). We store the full
+    // state for every placement so the editor can perfectly reconstruct
+    // the design if the user returns, on any device.
     placements: v.array(v.object({
+      placementId: v.string(),   // Client-generated unique ID for this
+                                  // placement — lets the SAME accessory be
+                                  // placed more than once on the same view.
       accessoryId: v.id("accessories"),
-      face:        v.union(v.literal("front"), v.literal("back")),
-      xPercent:    v.number(),    // 0–100: horizontal position
-      yPercent:    v.number(),    // 0–100: vertical position
-      rotation:    v.number(),    // degrees
-      scaleX:      v.number(),    // 1.0 = original size
-      scaleY:      v.number(),
-      zIndex:      v.number(),    // Layer order (for overlapping accessories)
+      viewId:      v.id("product_images"),  // which garment view/side this sits on
+      xMm:         v.number(),   // horizontal position, mm from view origin
+      yMm:         v.number(),   // vertical position, mm from view origin
+      rotation:    v.number(),   // degrees
+      scaleX:      v.number(),   // world-space scale actually applied
+      scaleY:      v.number(),   // (locked accessories: always the value
+                                  // derived from their real mm size; bounded
+                                  // accessories like DTF stickers: whatever
+                                  // the user chose within the allowed range)
+      zIndex:      v.number(),   // Layer order (for overlapping accessories)
     })),
     // Preview images generated by the editor (fabric canvas → PNG), uploaded
     // to Cloudinary via an unsigned upload preset directly from the browser.

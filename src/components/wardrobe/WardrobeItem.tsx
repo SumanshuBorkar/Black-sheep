@@ -50,7 +50,7 @@ interface WardrobeItemData {
     totalAccessoryCost: number;
     placements: Array<{
       accessoryId: Id<"accessories">;
-      face: "front" | "back";
+      viewId: Id<"product_images">;
     }>;
   } | null;
 }

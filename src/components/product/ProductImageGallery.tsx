@@ -56,7 +56,7 @@ export function ProductImageGallery({
     <div className="relative">
 
       {/* Front / Back toggle */}
-      {hasBoth && (
+      {/* {hasBoth && (
         <div className="flex justify-center gap-0 pt-6 px-2 md:px-4">
           {(["front", "back"] as const).map((face, i) => (
             <button
@@ -75,7 +75,7 @@ export function ProductImageGallery({
             </button>
           ))}
         </div>
-      )}
+      )} */}
 
       {/* Main image */}
       <div

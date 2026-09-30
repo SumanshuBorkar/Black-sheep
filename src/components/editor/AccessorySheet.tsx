@@ -33,10 +33,18 @@ const TABS = [
   { key: "bleach_art",         label: "BLEACH" },
 ];
 
+interface AccessoryForCanvas {
+  id: string;
+  cutoutUrl: string;
+  widthMm: number;
+  heightMm: number;
+  type: string;
+}
+
 interface AccessorySheetProps {
   isOpen:   boolean;
   onClose:  () => void;
-  onAddToCanvas?: (cutoutUrl: string, accessoryId: string) => void;
+  onAddToCanvas?: (accessory: AccessoryForCanvas) => void;
 }
 
 export function AccessorySheet({ isOpen, onClose, onAddToCanvas }: AccessorySheetProps) {
@@ -53,8 +61,17 @@ export function AccessorySheet({ isOpen, onClose, onAddToCanvas }: AccessoryShee
     cutoutUrl: string;
     title: string;
     price: number;
+    widthMm: number;
+    heightMm: number;
+    type: string;
   }) {
-    onAddToCanvas?.(accessory.cutoutUrl, accessory._id);
+    onAddToCanvas?.({
+      id: accessory._id,
+      cutoutUrl: accessory.cutoutUrl,
+      widthMm: accessory.widthMm,
+      heightMm: accessory.heightMm,
+      type: accessory.type,
+    });
     onClose();
   }
 
@@ -111,6 +128,9 @@ export function AccessorySheet({ isOpen, onClose, onAddToCanvas }: AccessoryShee
                     cutoutUrl: acc.cutoutUrl,
                     title:    acc.title,
                     price:    acc.price,
+                    widthMm:  acc.widthMm,
+                    heightMm: acc.heightMm,
+                    type:     acc.type,
                   })}
                   className="product-card flex flex-col items-center p-3 text-left"
                 >

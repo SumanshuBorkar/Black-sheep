@@ -27,6 +27,14 @@ export const attachProductImage = mutation({
     width:       v.number(),
     height:      v.number(),
     blurDataUrl: v.optional(v.string()),
+
+    // Editor / customisation view fields — see schema.ts for full context.
+    isEditorView:    v.optional(v.boolean()),
+    editorViewSlug:  v.optional(v.string()),
+    editorViewLabel: v.optional(v.string()),
+    editorSortOrder: v.optional(v.number()),
+    maxWidthMm:      v.optional(v.number()),
+    maxHeightMm:     v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     // If this is marked primary, un-mark any existing primary image

@@ -320,6 +320,41 @@ export const deleteProduct = mutation({
   },
 });
 
+// ─── QUERY: Get the customisable editor "views" (sides) for a product ────────
+// Used on: Editor page. Returns only images tagged isEditorView=true —
+// e.g. a T-shirt returns [front, back], a cap might return
+// [front, back, left, right, top]. Falls back to plain front/back angle
+// images for products created before editor views were introduced.
+export const getProductEditorViews = query({
+  args: { productId: v.id("products") },
+  handler: async (ctx, args) => {
+    const images = await ctx.db
+      .query("product_images")
+      .withIndex("by_product", (q) => q.eq("productId", args.productId))
+      .collect();
+
+    let views = images.filter((img) => img.isEditorView);
+
+    // Legacy fallback: no images explicitly tagged as editor views yet —
+    // use front/back angle images so older, un-migrated products still work
+    // in the editor (without accurate mm-based scaling until measured).
+    if (views.length === 0) {
+      views = images.filter((img) => img.angle === "front" || img.angle === "back");
+    }
+
+    views.sort((a, b) => (a.editorSortOrder ?? 0) - (b.editorSortOrder ?? 0));
+
+    return views.map((img) => ({
+      viewId:    img._id,
+      slug:      img.editorViewSlug ?? img.angle,
+      label:     img.editorViewLabel ?? img.angle.toUpperCase(),
+      publicId:  img.cloudinaryPublicId,
+      maxWidthMm:  img.maxWidthMm,
+      maxHeightMm: img.maxHeightMm,
+    }));
+  },
+});
+
 export const getProductById = query({
   args: { productId: v.id("products") },
   handler: async (ctx, args) => {

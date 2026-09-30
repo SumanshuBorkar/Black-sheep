@@ -13,13 +13,13 @@ export interface PromoItem {
 const DEFAULT_PROMOS: PromoItem[] = [
   {
     title: "TRY THIS GOTH FEATURE",
-    imageURL: "https://images.unsplash.com/photo-1601924994987-69e26d50dc26?q=80&w=600&auto=format&fit=crop",
+    imageURL: "https://i.pinimg.com/1200x/41/d2/b5/41d2b50db14f8d301478baab2caa34cd.jpg",
     href: "/shop?feature=goth",
   },
   {
     title: "MAKE YOUR OWN FITS",
     subtitle: "50% OFF ON STICKERS",
-    imageURL: "https://images.unsplash.com/photo-1578932750294-f5075e85f44a?q=80&w=600&auto=format&fit=crop",
+    imageURL: "https://i.pinimg.com/1200x/82/7b/a8/827ba8df10bcc998b02b6707a9754080.jpg",
     href: "/customizer",
   }
 ];
@@ -57,7 +57,7 @@ export function PromoSlider({ items = DEFAULT_PROMOS }: PromoSliderProps) {
 
   return (
     <div 
-      className="w-full h-[45vh] border-2 border-black bg-white relative overflow-hidden shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]"
+      className="w-100% h-[50vh] border-2 border-black bg-white relative overflow-hidden shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]"
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
     >

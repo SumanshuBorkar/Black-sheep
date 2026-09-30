@@ -15,12 +15,39 @@ const CONDITIONS = ["mint","good","fair","worn"] as const;
 const SIZE_SYSTEMS = ["IN","EU","US","UK","ONE_SIZE"] as const;
 
 type Angle = "front" | "back" | "detail" | "flat" | "lifestyle";
+type ViewSlug = "front" | "back" | "left" | "right" | "top" | "bottom" | "custom";
+
+const VIEW_SLUG_LABELS: Record<ViewSlug, string> = {
+  front: "Front", back: "Back", left: "Left", right: "Right",
+  top: "Top", bottom: "Bottom", custom: "Custom",
+};
 
 interface PendingImage {
   file: File;
   previewUrl: string;
   angle: Angle;
+  // Editor / customisation view fields — only used when isEditorView is true.
+  // Lets ANY photo become a customisable side in the design editor, not
+  // just front/back — e.g. a cap needs front+back+left+right+top.
+  isEditorView: boolean;
+  editorViewSlug: ViewSlug;
+  editorViewLabel: string;
+  maxWidthCm: string;   // full max width AS POSED in this exact photo
+  maxHeightCm: string;  // full max height AS POSED in this exact photo
 }
+
+// Suggested editor-view slots per category, so tagging a cap's 5 sides
+// doesn't mean typing "left"/"right"/"top" from scratch each time — the
+// admin still confirms/adjusts, this is just a starting point.
+const EDITOR_VIEW_TEMPLATES: Record<string, ViewSlug[]> = {
+  shirts:      ["front", "back"],
+  jackets:     ["front", "back"],
+  pants:       ["front", "back"],
+  accessories: ["front", "back", "left", "right", "top"],  // caps live here
+  shoes:       [],
+  glasses:     [],
+  other:       ["front", "back"],
+};
 
 export default function AdminAddProductPage() {
   const router = useRouter();
@@ -46,15 +73,31 @@ export default function AdminAddProductPage() {
 
   function handleFiles(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
+    const template = EDITOR_VIEW_TEMPLATES[form.category] ?? [];
+
     setPendingImages((prev) => [
       ...prev,
-      ...files.map((file, i) => ({
-        file,
-        previewUrl: URL.createObjectURL(file),
-        angle: (prev.length === 0 && i === 0 ? "front" : "detail") as Angle,
-      })),
+      ...files.map((file, i) => {
+        const slotIndex = prev.length + i;
+        const suggestedSlug = template[slotIndex];
+        const isEditorView = !!suggestedSlug;
+        return {
+          file,
+          previewUrl: URL.createObjectURL(file),
+          angle: (slotIndex === 0 ? "front" : suggestedSlug === "back" ? "back" : "detail") as Angle,
+          isEditorView,
+          editorViewSlug: (suggestedSlug ?? "front") as ViewSlug,
+          editorViewLabel: suggestedSlug ? VIEW_SLUG_LABELS[suggestedSlug] : "",
+          maxWidthCm: "",
+          maxHeightCm: "",
+        };
+      }),
     ]);
     e.target.value = "";
+  }
+
+  function updatePendingImage(index: number, updates: Partial<PendingImage>) {
+    setPendingImages((prev) => prev.map((p, i) => (i === index ? { ...p, ...updates } : p)));
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -63,6 +106,14 @@ export default function AdminAddProductPage() {
     const originalPrice = Number(form.originalPrice);
     const sellingPrice  = Number(form.sellingPrice);
     if (!originalPrice || !sellingPrice) { toast.error("Enter valid prices."); return; }
+
+    const missingMeasurement = pendingImages.find(
+      (img) => img.isEditorView && (!img.maxWidthCm || !img.maxHeightCm)
+    );
+    if (missingMeasurement) {
+      toast.error("Enter max width & height (cm) for every editor-view photo — this is what makes accessory sizing accurate.");
+      return;
+    }
 
     setIsSubmitting(true);
     try {
@@ -84,18 +135,28 @@ export default function AdminAddProductPage() {
         } : undefined,
       });
 
+      let editorSortOrder = 0;
       for (let i = 0; i < pendingImages.length; i++) {
-        const uploaded = await uploadImage(pendingImages[i].file, "blax-sheep/products");
+        const pending = pendingImages[i];
+        const uploaded = await uploadImage(pending.file, "blax-sheep/products");
         await attachImage({
           productId:          productId as Id<"products">,
           cloudinaryPublicId: uploaded.publicId,
           secureUrl:          uploaded.secureUrl,
-          angle:              pendingImages[i].angle,
+          angle:              pending.angle,
           isPrimary:          i === 0,
           sortOrder:          i,
           width:              uploaded.width,
           height:             uploaded.height,
           blurDataUrl:        uploaded.blurDataUrl,
+          isEditorView:       pending.isEditorView,
+          editorViewSlug:     pending.isEditorView ? pending.editorViewSlug : undefined,
+          editorViewLabel:    pending.isEditorView ? (pending.editorViewLabel || VIEW_SLUG_LABELS[pending.editorViewSlug]) : undefined,
+          editorSortOrder:    pending.isEditorView ? editorSortOrder++ : undefined,
+          // cm → mm: the measurement is taken in cm, stored in mm to match
+          // accessories.widthMm/heightMm so both use the same unit.
+          maxWidthMm:         pending.isEditorView ? Number(pending.maxWidthCm) * 10 : undefined,
+          maxHeightMm:        pending.isEditorView ? Number(pending.maxHeightCm) * 10 : undefined,
         });
       }
 
@@ -126,24 +187,75 @@ export default function AdminAddProductPage() {
           <input type="file" accept="image/*" multiple onChange={handleFiles}
             className="input-flat normal-case cursor-pointer" />
           {pendingImages.length > 0 && (
-            <div className="grid grid-cols-4 gap-2 mt-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-3">
               {pendingImages.map((img, i) => (
                 <div key={i} className="border border-black p-1.5">
                   <img src={img.previewUrl} alt="" className="w-full aspect-square object-cover mb-1" />
                   <select
                     value={img.angle}
-                    onChange={(e) => setPendingImages((prev) => prev.map((p, pi) =>
-                      pi === i ? { ...p, angle: e.target.value as Angle } : p
-                    ))}
+                    onChange={(e) => updatePendingImage(i, { angle: e.target.value as Angle })}
                     className="w-full font-mono text-2xs border border-black p-0.5 uppercase"
                   >
                     {["front","back","detail","flat","lifestyle"].map((a) => (
                       <option key={a} value={a}>{a.toUpperCase()}</option>
                     ))}
                   </select>
+
+                  <label className="flex items-center gap-1.5 mt-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={img.isEditorView}
+                      onChange={(e) => updatePendingImage(i, { isEditorView: e.target.checked })}
+                      className="w-3.5 h-3.5 accent-yellow"
+                    />
+                    <span className="font-mono text-2xs uppercase tracking-wide">Editor side</span>
+                  </label>
+
+                  {img.isEditorView && (
+                    <div className="mt-1.5 space-y-1 border-t border-black/20 pt-1.5">
+                      <select
+                        value={img.editorViewSlug}
+                        onChange={(e) => {
+                          const slug = e.target.value as ViewSlug;
+                          updatePendingImage(i, { editorViewSlug: slug, editorViewLabel: VIEW_SLUG_LABELS[slug] });
+                        }}
+                        className="w-full font-mono text-2xs border border-black p-0.5 uppercase"
+                      >
+                        {(Object.keys(VIEW_SLUG_LABELS) as ViewSlug[]).map((s) => (
+                          <option key={s} value={s}>{VIEW_SLUG_LABELS[s]}</option>
+                        ))}
+                      </select>
+                      <input
+                        value={img.editorViewLabel}
+                        onChange={(e) => updatePendingImage(i, { editorViewLabel: e.target.value })}
+                        placeholder="Tab label e.g. Cap Top"
+                        className="w-full font-mono text-2xs border border-black p-0.5 normal-case"
+                      />
+                      <div className="flex gap-1">
+                        <input
+                          type="number"
+                          value={img.maxWidthCm}
+                          onChange={(e) => updatePendingImage(i, { maxWidthCm: e.target.value })}
+                          placeholder="Max W (cm)"
+                          className="w-1/2 font-mono text-2xs border border-black p-0.5"
+                        />
+                        <input
+                          type="number"
+                          value={img.maxHeightCm}
+                          onChange={(e) => updatePendingImage(i, { maxHeightCm: e.target.value })}
+                          placeholder="Max H (cm)"
+                          className="w-1/2 font-mono text-2xs border border-black p-0.5"
+                        />
+                      </div>
+                      <p className="font-mono text-[9px] text-muted-foreground normal-case leading-tight">
+                        Measure the item's actual max width/height AS POSED in this photo (e.g. sleeve-to-sleeve, or max folded width).
+                      </p>
+                    </div>
+                  )}
+
                   <button type="button"
                     onClick={() => setPendingImages((prev) => prev.filter((_, pi) => pi !== i))}
-                    className="font-mono text-2xs text-sold uppercase underline mt-1 block">
+                    className="font-mono text-2xs text-sold uppercase underline mt-1.5 block">
                     Remove
                   </button>
                 </div>

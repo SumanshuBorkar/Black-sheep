@@ -125,14 +125,67 @@ export function calculateWardrobeTotal(
   }, 0);
 }
 
-// ─── Editor: convert pixel position to percentage ────────────────────────────
-// The editor stores positions as percentages so designs work on any screen.
-export function toPercent(value: number, total: number): number {
-  return Math.round((value / total) * 10000) / 100;  // 2 decimal places
+// ─── Editor: world-space calibration (mm ↔ px) ───────────────────────────────
+//
+// Plain English:
+// Every product photo is taken with the same camera at the same distance,
+// so pixels-per-millimetre is effectively constant across the whole
+// catalogue. Rather than trust one hardcoded constant forever (which would
+// silently drift if a photo is framed slightly differently, or if
+// Cloudinary's delivery pipeline resizes an image), we derive it FRESH from
+// each photo: its own delivered pixel width divided by the real max-width
+// (mm) that was measured for that exact pose before the shot. Same formula
+// for height as an independent cross-check.
+//
+// This is what lets accessory sizes and garment sizes render at true
+// relative scale, and what lets accessory position be stored in mm
+// (device-independent) instead of a percentage of on-screen canvas pixels
+// (which breaks under letterboxing / different viewport sizes).
+
+export interface PxPerMm {
+  x: number;
+  y: number;
+  /** Single scalar to use for isotropic (uniform) scaling — the average of x and y. */
+  avg: number;
+  /** True if the x- and y-derived values disagree by more than ~4% — a data-quality flag. */
+  isSuspect: boolean;
 }
 
-export function fromPercent(percent: number, total: number): number {
-  return (percent / 100) * total;
+/**
+ * Derive pixels-per-millimetre for a garment photo from its own delivered
+ * pixel dimensions and the max width/height (mm) measured for that pose.
+ * Falls back gracefully (returns null) if measurement data isn't present
+ * yet — callers should degrade to a fixed relative size in that case
+ * rather than crash.
+ */
+export function computePxPerMm(
+  imagePxWidth: number,
+  imagePxHeight: number,
+  maxWidthMm?: number,
+  maxHeightMm?: number
+): PxPerMm | null {
+  if (!maxWidthMm || !maxHeightMm || maxWidthMm <= 0 || maxHeightMm <= 0) {
+    return null;
+  }
+  const x = imagePxWidth / maxWidthMm;
+  const y = imagePxHeight / maxHeightMm;
+  const avg = (x + y) / 2;
+  const isSuspect = Math.abs(x - y) / avg > 0.04;
+  if (isSuspect && typeof console !== "undefined") {
+    console.warn(
+      `[editor] px-per-mm mismatch for this photo: width-derived=${x.toFixed(3)}, height-derived=${y.toFixed(3)}. ` +
+      `Check the photo crop and the measured maxWidthMm/maxHeightMm for this view.`
+    );
+  }
+  return { x, y, avg, isSuspect };
+}
+
+export function mmToPx(mm: number, pxPerMm: number): number {
+  return mm * pxPerMm;
+}
+
+export function pxToMm(px: number, pxPerMm: number): number {
+  return px / pxPerMm;
 }
 
 // ─── Truncate text ────────────────────────────────────────────────────────────

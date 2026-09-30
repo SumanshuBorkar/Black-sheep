@@ -1,0 +1,1543 @@
+diff --git a/convex/designs.ts b/convex/designs.ts
+index bf0970f..caed555 100644
+--- a/convex/designs.ts
++++ b/convex/designs.ts
+@@ -6,9 +6,10 @@ import { mutation, query } from "./_generated/server";
+  *
+  * Plain English:
+  * A "design" is the saved state of the customisation editor for one
+- * product. It stores where each accessory sits on the garment (as
+- * percentages so it renders correctly on any screen size) plus the
+- * Cloudinary public IDs of the exported preview images.
++ * product. It stores where each accessory sits on the garment — in
++ * millimetres, relative to that garment view's own origin, so the design
++ * is device-independent and true to physical scale — plus the Cloudinary
++ * public IDs of the exported preview images.
+  *
+  * Flow:
+  * 1. User opens editor → upsertDesign called on first auto-save (status: draft)
+@@ -18,10 +19,11 @@ import { mutation, query } from "./_generated/server";
+  */
+ 
+ const placementValidator = v.object({
++  placementId: v.string(),
+   accessoryId: v.id("accessories"),
+-  face:        v.union(v.literal("front"), v.literal("back")),
+-  xPercent:    v.number(),
+-  yPercent:    v.number(),
++  viewId:      v.id("product_images"),
++  xMm:         v.number(),
++  yMm:         v.number(),
+   rotation:    v.number(),
+   scaleX:      v.number(),
+   scaleY:      v.number(),
+diff --git a/convex/products.ts b/convex/products.ts
+index f587fba..45bad64 100644
+--- a/convex/products.ts
++++ b/convex/products.ts
+@@ -320,6 +320,41 @@ export const deleteProduct = mutation({
+   },
+ });
+ 
++// ─── QUERY: Get the customisable editor "views" (sides) for a product ────────
++// Used on: Editor page. Returns only images tagged isEditorView=true —
++// e.g. a T-shirt returns [front, back], a cap might return
++// [front, back, left, right, top]. Falls back to plain front/back angle
++// images for products created before editor views were introduced.
++export const getProductEditorViews = query({
++  args: { productId: v.id("products") },
++  handler: async (ctx, args) => {
++    const images = await ctx.db
++      .query("product_images")
++      .withIndex("by_product", (q) => q.eq("productId", args.productId))
++      .collect();
++
++    let views = images.filter((img) => img.isEditorView);
++
++    // Legacy fallback: no images explicitly tagged as editor views yet —
++    // use front/back angle images so older, un-migrated products still work
++    // in the editor (without accurate mm-based scaling until measured).
++    if (views.length === 0) {
++      views = images.filter((img) => img.angle === "front" || img.angle === "back");
++    }
++
++    views.sort((a, b) => (a.editorSortOrder ?? 0) - (b.editorSortOrder ?? 0));
++
++    return views.map((img) => ({
++      viewId:    img._id,
++      slug:      img.editorViewSlug ?? img.angle,
++      label:     img.editorViewLabel ?? img.angle.toUpperCase(),
++      publicId:  img.cloudinaryPublicId,
++      maxWidthMm:  img.maxWidthMm,
++      maxHeightMm: img.maxHeightMm,
++    }));
++  },
++});
++
+ export const getProductById = query({
+   args: { productId: v.id("products") },
+   handler: async (ctx, args) => {
+diff --git a/convex/schema.ts b/convex/schema.ts
+index d7e093d..98fa661 100644
+--- a/convex/schema.ts
++++ b/convex/schema.ts
+@@ -110,9 +110,35 @@ export default defineSchema({
+     blurDataUrl: v.optional(v.string()),
+     width:      v.number(),   // Original upload dimensions
+     height:     v.number(),
++
++    // ──────────────────────────────────────────────────────────────────────
++    // EDITOR / CUSTOMISATION VIEW FIELDS (all optional — most product photos
++    // are just merchandising shots and never touch the editor).
++    //
++    // Marking a photo isEditorView=true turns it into a customisable "side"
++    // in the design editor. A product can have as many editor views as it
++    // needs — a T-shirt needs front+back, a cap needs
++    // front+back+left+right+top. Just upload more photos and tag them.
++    //
++    // maxWidthMm/maxHeightMm is the ACTUAL maximum width/height of the
++    // garment AS POSED in this exact photo (e.g. full sleeve-to-sleeve
++    // spread for a tee, max folded width for a hoodie, max width across
++    // for a cap) — measured by hand before the shot. Because every photo
++    // is taken with the same camera at the same distance, dividing this
++    // photo's own pixel width by maxWidthMm gives an accurate, self
++    // -calibrating pixels-per-millimetre value with no separate
++    // calibration step required.
++    // ──────────────────────────────────────────────────────────────────────
++    isEditorView:    v.optional(v.boolean()),
++    editorViewSlug:  v.optional(v.string()),   // "front" | "back" | "left" | "right" | "top" | "bottom" | custom
++    editorViewLabel: v.optional(v.string()),   // "Cap Top" — shown as a tab in the editor
++    editorSortOrder: v.optional(v.number()),   // tab order, independent of gallery sortOrder
++    maxWidthMm:      v.optional(v.number()),
++    maxHeightMm:     v.optional(v.number()),
+   })
+     .index("by_product",          ["productId"])
+-    .index("by_product_primary",  ["productId", "isPrimary"]),
++    .index("by_product_primary",  ["productId", "isPrimary"])
++    .index("by_product_editor_view", ["productId", "isEditorView"]),
+ 
+   // ──────────────────────────────────────────────────────────────────────────
+   // ACCESSORIES
+@@ -167,8 +193,14 @@ export default defineSchema({
+   // Created when a user opens the editor for a product.
+   // Stores the exact position of every accessory on the garment.
+   //
+-  // Key design decision: positions are stored as PERCENTAGES (0–100),
+-  // not pixels. This means the design looks correct on any screen size.
++  // Key design decision: positions are stored in MILLIMETRES, relative to a
++  // fixed origin on the garment (its own photo's top-left), not as a
++  // percentage of on-screen canvas pixels. This is what makes an accessory's
++  // position and size device-independent: the same design looks identical
++  // on a phone or a monitor, because the underlying number never changes —
++  // only the on-screen zoom/pan window onto it does. It's also what lets us
++  // scale accessories to their true physical size (see product_images and
++  // accessories.widthMm/heightMm).
+   // ──────────────────────────────────────────────────────────────────────────
+   custom_designs: defineTable({
+     userId:     v.string(),         // Clerk user ID
+@@ -179,18 +211,25 @@ export default defineSchema({
+       v.literal("in_wardrobe"),  // Added to wardrobe
+       v.literal("ordered")       // Part of a completed order
+     ),
+-    // Placement: where each accessory sits on the garment
+-    // We store the full canvas state for each face so the editor
+-    // can perfectly reconstruct the design if the user returns.
++    // Placement: where each accessory sits on a specific garment view
++    // (e.g. front / back / left / right / cap-top). We store the full
++    // state for every placement so the editor can perfectly reconstruct
++    // the design if the user returns, on any device.
+     placements: v.array(v.object({
++      placementId: v.string(),   // Client-generated unique ID for this
++                                  // placement — lets the SAME accessory be
++                                  // placed more than once on the same view.
+       accessoryId: v.id("accessories"),
+-      face:        v.union(v.literal("front"), v.literal("back")),
+-      xPercent:    v.number(),    // 0–100: horizontal position
+-      yPercent:    v.number(),    // 0–100: vertical position
+-      rotation:    v.number(),    // degrees
+-      scaleX:      v.number(),    // 1.0 = original size
+-      scaleY:      v.number(),
+-      zIndex:      v.number(),    // Layer order (for overlapping accessories)
++      viewId:      v.id("product_images"),  // which garment view/side this sits on
++      xMm:         v.number(),   // horizontal position, mm from view origin
++      yMm:         v.number(),   // vertical position, mm from view origin
++      rotation:    v.number(),   // degrees
++      scaleX:      v.number(),   // world-space scale actually applied
++      scaleY:      v.number(),   // (locked accessories: always the value
++                                  // derived from their real mm size; bounded
++                                  // accessories like DTF stickers: whatever
++                                  // the user chose within the allowed range)
++      zIndex:      v.number(),   // Layer order (for overlapping accessories)
+     })),
+     // Preview images generated by the editor (fabric canvas → PNG), uploaded
+     // to Cloudinary via an unsigned upload preset directly from the browser.
+diff --git a/convex/storage.ts b/convex/storage.ts
+index f2a82ee..4148891 100644
+--- a/convex/storage.ts
++++ b/convex/storage.ts
+@@ -27,6 +27,14 @@ export const attachProductImage = mutation({
+     width:       v.number(),
+     height:      v.number(),
+     blurDataUrl: v.optional(v.string()),
++
++    // Editor / customisation view fields — see schema.ts for full context.
++    isEditorView:    v.optional(v.boolean()),
++    editorViewSlug:  v.optional(v.string()),
++    editorViewLabel: v.optional(v.string()),
++    editorSortOrder: v.optional(v.number()),
++    maxWidthMm:      v.optional(v.number()),
++    maxHeightMm:     v.optional(v.number()),
+   },
+   handler: async (ctx, args) => {
+     // If this is marked primary, un-mark any existing primary image
+diff --git a/src/app/admin/products/new/page.tsx b/src/app/admin/products/new/page.tsx
+index 0d12807..ddd8a2b 100644
+--- a/src/app/admin/products/new/page.tsx
++++ b/src/app/admin/products/new/page.tsx
+@@ -15,13 +15,40 @@ const CONDITIONS = ["mint","good","fair","worn"] as const;
+ const SIZE_SYSTEMS = ["IN","EU","US","UK","ONE_SIZE"] as const;
+ 
+ type Angle = "front" | "back" | "detail" | "flat" | "lifestyle";
++type ViewSlug = "front" | "back" | "left" | "right" | "top" | "bottom" | "custom";
++
++const VIEW_SLUG_LABELS: Record<ViewSlug, string> = {
++  front: "Front", back: "Back", left: "Left", right: "Right",
++  top: "Top", bottom: "Bottom", custom: "Custom",
++};
+ 
+ interface PendingImage {
+   file: File;
+   previewUrl: string;
+   angle: Angle;
++  // Editor / customisation view fields — only used when isEditorView is true.
++  // Lets ANY photo become a customisable side in the design editor, not
++  // just front/back — e.g. a cap needs front+back+left+right+top.
++  isEditorView: boolean;
++  editorViewSlug: ViewSlug;
++  editorViewLabel: string;
++  maxWidthCm: string;   // full max width AS POSED in this exact photo
++  maxHeightCm: string;  // full max height AS POSED in this exact photo
+ }
+ 
++// Suggested editor-view slots per category, so tagging a cap's 5 sides
++// doesn't mean typing "left"/"right"/"top" from scratch each time — the
++// admin still confirms/adjusts, this is just a starting point.
++const EDITOR_VIEW_TEMPLATES: Record<string, ViewSlug[]> = {
++  shirts:      ["front", "back"],
++  jackets:     ["front", "back"],
++  pants:       ["front", "back"],
++  accessories: ["front", "back", "left", "right", "top"],  // caps live here
++  shoes:       [],
++  glasses:     [],
++  other:       ["front", "back"],
++};
++
+ export default function AdminAddProductPage() {
+   const router = useRouter();
+   const { toast } = useToast();
+@@ -46,17 +73,33 @@ export default function AdminAddProductPage() {
+ 
+   function handleFiles(e: React.ChangeEvent<HTMLInputElement>) {
+     const files = Array.from(e.target.files ?? []);
++    const template = EDITOR_VIEW_TEMPLATES[form.category] ?? [];
++
+     setPendingImages((prev) => [
+       ...prev,
+-      ...files.map((file, i) => ({
+-        file,
+-        previewUrl: URL.createObjectURL(file),
+-        angle: (prev.length === 0 && i === 0 ? "front" : "detail") as Angle,
+-      })),
++      ...files.map((file, i) => {
++        const slotIndex = prev.length + i;
++        const suggestedSlug = template[slotIndex];
++        const isEditorView = !!suggestedSlug;
++        return {
++          file,
++          previewUrl: URL.createObjectURL(file),
++          angle: (slotIndex === 0 ? "front" : suggestedSlug === "back" ? "back" : "detail") as Angle,
++          isEditorView,
++          editorViewSlug: (suggestedSlug ?? "front") as ViewSlug,
++          editorViewLabel: suggestedSlug ? VIEW_SLUG_LABELS[suggestedSlug] : "",
++          maxWidthCm: "",
++          maxHeightCm: "",
++        };
++      }),
+     ]);
+     e.target.value = "";
+   }
+ 
++  function updatePendingImage(index: number, updates: Partial<PendingImage>) {
++    setPendingImages((prev) => prev.map((p, i) => (i === index ? { ...p, ...updates } : p)));
++  }
++
+   async function handleSubmit(e: React.FormEvent) {
+     e.preventDefault();
+     if (pendingImages.length === 0) { toast.error("Add at least one photo."); return; }
+@@ -64,6 +107,14 @@ export default function AdminAddProductPage() {
+     const sellingPrice  = Number(form.sellingPrice);
+     if (!originalPrice || !sellingPrice) { toast.error("Enter valid prices."); return; }
+ 
++    const missingMeasurement = pendingImages.find(
++      (img) => img.isEditorView && (!img.maxWidthCm || !img.maxHeightCm)
++    );
++    if (missingMeasurement) {
++      toast.error("Enter max width & height (cm) for every editor-view photo — this is what makes accessory sizing accurate.");
++      return;
++    }
++
+     setIsSubmitting(true);
+     try {
+       const slug = `${generateSlug(form.title)}-${generateSlug(form.size)}-${Date.now().toString(36)}`;
+@@ -84,18 +135,28 @@ export default function AdminAddProductPage() {
+         } : undefined,
+       });
+ 
++      let editorSortOrder = 0;
+       for (let i = 0; i < pendingImages.length; i++) {
+-        const uploaded = await uploadImage(pendingImages[i].file, "blax-sheep/products");
++        const pending = pendingImages[i];
++        const uploaded = await uploadImage(pending.file, "blax-sheep/products");
+         await attachImage({
+           productId:          productId as Id<"products">,
+           cloudinaryPublicId: uploaded.publicId,
+           secureUrl:          uploaded.secureUrl,
+-          angle:              pendingImages[i].angle,
++          angle:              pending.angle,
+           isPrimary:          i === 0,
+           sortOrder:          i,
+           width:              uploaded.width,
+           height:             uploaded.height,
+           blurDataUrl:        uploaded.blurDataUrl,
++          isEditorView:       pending.isEditorView,
++          editorViewSlug:     pending.isEditorView ? pending.editorViewSlug : undefined,
++          editorViewLabel:    pending.isEditorView ? (pending.editorViewLabel || VIEW_SLUG_LABELS[pending.editorViewSlug]) : undefined,
++          editorSortOrder:    pending.isEditorView ? editorSortOrder++ : undefined,
++          // cm → mm: the measurement is taken in cm, stored in mm to match
++          // accessories.widthMm/heightMm so both use the same unit.
++          maxWidthMm:         pending.isEditorView ? Number(pending.maxWidthCm) * 10 : undefined,
++          maxHeightMm:        pending.isEditorView ? Number(pending.maxHeightCm) * 10 : undefined,
+         });
+       }
+ 
+@@ -126,24 +187,75 @@ export default function AdminAddProductPage() {
+           <input type="file" accept="image/*" multiple onChange={handleFiles}
+             className="input-flat normal-case cursor-pointer" />
+           {pendingImages.length > 0 && (
+-            <div className="grid grid-cols-4 gap-2 mt-3">
++            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-3">
+               {pendingImages.map((img, i) => (
+                 <div key={i} className="border border-black p-1.5">
+                   <img src={img.previewUrl} alt="" className="w-full aspect-square object-cover mb-1" />
+                   <select
+                     value={img.angle}
+-                    onChange={(e) => setPendingImages((prev) => prev.map((p, pi) =>
+-                      pi === i ? { ...p, angle: e.target.value as Angle } : p
+-                    ))}
++                    onChange={(e) => updatePendingImage(i, { angle: e.target.value as Angle })}
+                     className="w-full font-mono text-2xs border border-black p-0.5 uppercase"
+                   >
+                     {["front","back","detail","flat","lifestyle"].map((a) => (
+                       <option key={a} value={a}>{a.toUpperCase()}</option>
+                     ))}
+                   </select>
++
++                  <label className="flex items-center gap-1.5 mt-1.5 cursor-pointer">
++                    <input
++                      type="checkbox"
++                      checked={img.isEditorView}
++                      onChange={(e) => updatePendingImage(i, { isEditorView: e.target.checked })}
++                      className="w-3.5 h-3.5 accent-yellow"
++                    />
++                    <span className="font-mono text-2xs uppercase tracking-wide">Editor side</span>
++                  </label>
++
++                  {img.isEditorView && (
++                    <div className="mt-1.5 space-y-1 border-t border-black/20 pt-1.5">
++                      <select
++                        value={img.editorViewSlug}
++                        onChange={(e) => {
++                          const slug = e.target.value as ViewSlug;
++                          updatePendingImage(i, { editorViewSlug: slug, editorViewLabel: VIEW_SLUG_LABELS[slug] });
++                        }}
++                        className="w-full font-mono text-2xs border border-black p-0.5 uppercase"
++                      >
++                        {(Object.keys(VIEW_SLUG_LABELS) as ViewSlug[]).map((s) => (
++                          <option key={s} value={s}>{VIEW_SLUG_LABELS[s]}</option>
++                        ))}
++                      </select>
++                      <input
++                        value={img.editorViewLabel}
++                        onChange={(e) => updatePendingImage(i, { editorViewLabel: e.target.value })}
++                        placeholder="Tab label e.g. Cap Top"
++                        className="w-full font-mono text-2xs border border-black p-0.5 normal-case"
++                      />
++                      <div className="flex gap-1">
++                        <input
++                          type="number"
++                          value={img.maxWidthCm}
++                          onChange={(e) => updatePendingImage(i, { maxWidthCm: e.target.value })}
++                          placeholder="Max W (cm)"
++                          className="w-1/2 font-mono text-2xs border border-black p-0.5"
++                        />
++                        <input
++                          type="number"
++                          value={img.maxHeightCm}
++                          onChange={(e) => updatePendingImage(i, { maxHeightCm: e.target.value })}
++                          placeholder="Max H (cm)"
++                          className="w-1/2 font-mono text-2xs border border-black p-0.5"
++                        />
++                      </div>
++                      <p className="font-mono text-[9px] text-muted-foreground normal-case leading-tight">
++                        Measure the item's actual max width/height AS POSED in this photo (e.g. sleeve-to-sleeve, or max folded width).
++                      </p>
++                    </div>
++                  )}
++
+                   <button type="button"
+                     onClick={() => setPendingImages((prev) => prev.filter((_, pi) => pi !== i))}
+-                    className="font-mono text-2xs text-sold uppercase underline mt-1 block">
++                    className="font-mono text-2xs text-sold uppercase underline mt-1.5 block">
+                     Remove
+                   </button>
+                 </div>
+diff --git a/src/app/editor/[productId]/page.tsx b/src/app/editor/[productId]/page.tsx
+index d04fbf2..27d1cff 100644
+--- a/src/app/editor/[productId]/page.tsx
++++ b/src/app/editor/[productId]/page.tsx
+@@ -32,9 +32,13 @@ export default async function EditorPage({
+ 
+   if (!product || !product.isCustomizable) notFound();
+ 
+-  const frontImage = product.images?.find((img) => img.angle === "front")
+-    ?? product.images?.[0];
+-  const backImage  = product.images?.find((img) => img.angle === "back");
++  // A product can expose any number of customisable sides — front/back for
++  // most garments, but front/back/left/right/top for something like a cap.
++  const views = await fetchQuery(api.products.getProductEditorViews, {
++    productId: productId as Id<"products">,
++  });
++
++  if (views.length === 0) notFound();
+ 
+   return (
+     <EditorShell
+@@ -44,8 +48,7 @@ export default async function EditorPage({
+         slug:       product.slug,
+         sellingPrice: product.sellingPrice,
+       }}
+-      frontImagePublicId={frontImage?.cloudinaryPublicId ?? ""}
+-      backImagePublicId={backImage?.cloudinaryPublicId ?? ""}
++      views={views}
+       existingDesignId={designId as Id<"custom_designs"> | undefined}
+     />
+   );
+diff --git a/src/components/editor/AccessorySheet.tsx b/src/components/editor/AccessorySheet.tsx
+index d649f82..02fef79 100644
+--- a/src/components/editor/AccessorySheet.tsx
++++ b/src/components/editor/AccessorySheet.tsx
+@@ -33,10 +33,18 @@ const TABS = [
+   { key: "bleach_art",         label: "BLEACH" },
+ ];
+ 
++interface AccessoryForCanvas {
++  id: string;
++  cutoutUrl: string;
++  widthMm: number;
++  heightMm: number;
++  type: string;
++}
++
+ interface AccessorySheetProps {
+   isOpen:   boolean;
+   onClose:  () => void;
+-  onAddToCanvas?: (cutoutUrl: string, accessoryId: string) => void;
++  onAddToCanvas?: (accessory: AccessoryForCanvas) => void;
+ }
+ 
+ export function AccessorySheet({ isOpen, onClose, onAddToCanvas }: AccessorySheetProps) {
+@@ -53,8 +61,17 @@ export function AccessorySheet({ isOpen, onClose, onAddToCanvas }: AccessoryShee
+     cutoutUrl: string;
+     title: string;
+     price: number;
++    widthMm: number;
++    heightMm: number;
++    type: string;
+   }) {
+-    onAddToCanvas?.(accessory.cutoutUrl, accessory._id);
++    onAddToCanvas?.({
++      id: accessory._id,
++      cutoutUrl: accessory.cutoutUrl,
++      widthMm: accessory.widthMm,
++      heightMm: accessory.heightMm,
++      type: accessory.type,
++    });
+     onClose();
+   }
+ 
+@@ -111,6 +128,9 @@ export function AccessorySheet({ isOpen, onClose, onAddToCanvas }: AccessoryShee
+                     cutoutUrl: acc.cutoutUrl,
+                     title:    acc.title,
+                     price:    acc.price,
++                    widthMm:  acc.widthMm,
++                    heightMm: acc.heightMm,
++                    type:     acc.type,
+                   })}
+                   className="product-card flex flex-col items-center p-3 text-left"
+                 >
+diff --git a/src/components/editor/EditorCanvas.tsx b/src/components/editor/EditorCanvas.tsx
+index 43cf123..82eaa9f 100644
+--- a/src/components/editor/EditorCanvas.tsx
++++ b/src/components/editor/EditorCanvas.tsx
+@@ -6,223 +6,504 @@ import {
+   useImperativeHandle,
+   forwardRef,
+   useCallback,
++  useMemo,
++  useState,
+ } from "react";
++import { useQuery } from "convex/react";
++import { RefreshCw } from "lucide-react";
++import { api } from "../../../convex/_generated/api";
+ import { useEditorStore } from "../../store/editorStore";
+ import { cld } from "@/lib/cloudinary";
+-import { toPercent, fromPercent } from "@/lib/utils";
++import { computePxPerMm, mmToPx, pxToMm } from "@/lib/utils";
+ 
+ /**
+- * EditorCanvas — the Fabric.js drawing surface
++ * EditorCanvas — the Fabric.js drawing surface, in WORLD SPACE.
+  *
+- * Plain English:
+- * Fabric.js is a canvas library that makes objects (images, shapes)
+- * draggable, scalable, and rotatable with touch support built in.
++ * Plain English — the core idea:
++ * There are two coordinate systems at play, and they must never mix:
+  *
+- * We maintain TWO canvases — one for the front view, one for the back.
+- * Only the active face canvas is visible; the other is hidden but
+- * preserved in memory so switching faces doesn't lose placements.
++ * 1. WORLD SPACE — one Fabric canvas per garment "view" (front/back/left/
++ *    right/cap-top/...), sized to exactly match that view's photo in
++ *    pixels. Objects placed on it are scaled using that photo's own
++ *    pixels-per-millimetre (derived from the real max-width/height
++ *    measured for that pose) — so a 40mm patch is always 40mm, regardless
++ *    of screen size. Position is stored in millimetres from the view's
++ *    origin, not screen pixels.
++ * 2. VIEW SPACE — a zoom/pan (Fabric "viewport transform") applied on top,
++ *    purely to fit the world canvas into whatever container size the
++ *    device gives us. Zooming or panning NEVER changes an object's actual
++ *    left/top/scaleX/scaleY — only how much of the world is visible and
++ *    at what magnification.
+  *
+- * Key technical decisions:
+- * - Positions stored as PERCENTAGES in editorStore, converted to
+- *   pixels when placing on canvas and back to % when reading.
+- *   This means the design renders correctly on any screen size.
+- * - The product flat-lay image is the canvas background (not a
+- *   Fabric object) — so it can't be accidentally selected/moved.
+- * - Accessories are loaded as Fabric Image objects with their
+- *   Cloudinary cutout URL (transparent PNG background).
+- * - exportPNG() merges background + objects into a flat JPEG for
+- *   the preview image uploaded to Cloudinary.
++ * This separation is what makes the editor both size-accurate AND
++ * responsive: resizing the window, rotating a phone, or pinch-zooming
++ * only ever touches the viewport transform.
++ *
++ * Each view's Fabric canvas is created lazily (on first visit) and then
++ * kept alive (hidden, not disposed) so switching tabs doesn't lose work
++ * or require re-fetching the image.
+  */
+ 
++export interface EditorView {
++  viewId: string;
++  slug: string;
++  label: string;
++  publicId: string;
++  maxWidthMm?: number;
++  maxHeightMm?: number;
++}
++
++export interface AccessoryForCanvas {
++  id: string;
++  cutoutUrl: string;
++  widthMm: number;
++  heightMm: number;
++  type: string;
++}
++
+ interface EditorCanvasProps {
+-  frontImagePublicId: string;
+-  backImagePublicId:  string;
+-  activeFace: "front" | "back";
++  views: EditorView[];
++  activeViewId: string;
+ }
+ 
+ export interface EditorCanvasHandle {
+-  exportPNG: (face: "front" | "back") => Promise<Blob | null>;
+-  addAccessoryToCanvas: (cutoutUrl: string, accessoryId: string) => void;
++  exportPNG: (viewId: string) => Promise<Blob | null>;
++  addAccessoryToCanvas: (accessory: AccessoryForCanvas) => void;
++  recenter: () => void;
++}
++
++// Accessory types the customer may resize, within a bounded fraction of
++// their nominal real-world size. Everything NOT listed here is locked to
++// its true physical size — position and rotation are the only degrees of
++// freedom, by design (per the physical accuracy requirements).
++const BOUNDED_TYPES: Record<string, { min: number; max: number }> = {
++  dtf_sticker: { min: 0.6, max: 1.6 },
++};
++
++const MIN_ZOOM_MULT = 1;   // relative to fit-to-container zoom
++const MAX_ZOOM_MULT = 4;
++
++function touchDistance(e: TouchEvent): number {
++  const [a, b] = [e.touches[0], e.touches[1]];
++  return Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
++}
++
++function applyLockOrBounds(
++  img: any,
++  accessoryType: string | undefined,
++  pxPerMm: number,
++  accessory?: AccessoryForCanvas
++) {
++  const bounds = accessoryType ? BOUNDED_TYPES[accessoryType] : undefined;
++
++  if (!bounds) {
++    // Locked: true-to-life size only. Move + rotate allowed, no resize.
++    img.set({ lockScalingX: true, lockScalingY: true });
++    img.setControlsVisibility({
++      ml: false, mr: false, mt: false, mb: false,
++      tl: false, tr: false, bl: false, br: false,
++      mtr: true,
++    });
++  } else {
++    // Bounded (e.g. DTF stickers): uniform resize only, clamped to a
++    // min/max fraction of the accessory's nominal real-world size.
++    img.set({ lockScalingFlip: true });
++    img.setControlsVisibility({
++      ml: false, mr: false, mt: false, mb: false,
++      tl: false, tr: true, bl: false, br: true,
++      mtr: true,
++    });
++    if (accessory && pxPerMm) {
++      const nominalWpx = mmToPx(accessory.widthMm, pxPerMm);
++      const nominalHpx = mmToPx(accessory.heightMm, pxPerMm);
++      img.__sizeBoundsPx = {
++        minW: nominalWpx * bounds.min,
++        maxW: nominalWpx * bounds.max,
++        minH: nominalHpx * bounds.min,
++        maxH: nominalHpx * bounds.max,
++      };
++    }
++  }
+ }
+ 
+ export const EditorCanvas = forwardRef<EditorCanvasHandle, EditorCanvasProps>(
+-  function EditorCanvas({ frontImagePublicId, backImagePublicId, activeFace }, ref) {
+-    const frontCanvasEl = useRef<HTMLCanvasElement>(null);
+-    const backCanvasEl  = useRef<HTMLCanvasElement>(null);
+-    const frontFabric   = useRef<any>(null);
+-    const backFabric    = useRef<any>(null);
+-    const containerRef  = useRef<HTMLDivElement>(null);
++  function EditorCanvas({ views, activeViewId }, ref) {
++    const containerRef = useRef<HTMLDivElement>(null);
+ 
+-    const { addPlacement, updatePlacement, removePlacement, placements } = useEditorStore();
++    // Per-view state, keyed by viewId — lazily populated as views are opened.
++    const canvasElRefs      = useRef<Map<string, HTMLCanvasElement>>(new Map());
++    const fabricRefs        = useRef<Map<string, any>>(new Map());
++    const pxPerMmRefs       = useRef<Map<string, number>>(new Map());
++    const fitZoomRefs       = useRef<Map<string, number>>(new Map());
++    const initializingRefs  = useRef<Set<string>>(new Set());
++    const renderedPlacementIds = useRef<Set<string>>(new Set());
+ 
+-    // ── Initialise Fabric canvases ─────────────────────────────────────────
+-    useEffect(() => {
+-      let isMounted = true;
+-
+-      async function init() {
+-        // Dynamic import — Fabric.js is ~300KB, only load when editor opens
+-        const { Canvas, FabricImage, util } = await import("fabric");
+-
+-        const container = containerRef.current;
+-        if (!container || !isMounted) return;
+-
+-        const W = container.clientWidth;
+-        const H = container.clientHeight;
+-
+-        // Helper: initialise one Fabric canvas with a background image
+-        async function makeCanvas(
+-          el: HTMLCanvasElement | null,
+-          imagePublicId: string
+-        ) {
+-          if (!el || !imagePublicId) return null;
+-
+-          const fc = new Canvas(el, {
+-            width:               W,
+-            height:              H,
+-            selection:           true,
+-            preserveObjectStacking: true,
+-            backgroundColor:     "#FFFFFF",
+-          });
++    const [readyViewIds, setReadyViewIds] = useState<Set<string>>(new Set());
+ 
+-          // Load background image (product flat-lay)
+-          const bgUrl = cld(imagePublicId, "full");
+-          const bgImg = await FabricImage.fromURL(bgUrl, { crossOrigin: "anonymous" });
+-
+-          // Scale background to fill canvas while maintaining aspect ratio
+-          const scale = Math.min(W / bgImg.width!, H / bgImg.height!);
+-          bgImg.set({
+-            scaleX:       scale,
+-            scaleY:       scale,
+-            left:         (W - bgImg.width!  * scale) / 2,
+-            top:          (H - bgImg.height! * scale) / 2,
+-            selectable:   false,
+-            evented:      false,
+-            excludeFromExport: false,
+-          });
+-          fc.add(bgImg);
+-          fc.sendObjectToBack(bgImg);
+-
+-          // When any object is modified, update the store
+-          fc.on("object:modified", (e: any) => {
+-            const obj = e.target;
+-            if (!obj?.accessoryId) return;
+-            const face = el === frontCanvasEl.current ? "front" : "back";
+-            updatePlacement(obj.accessoryId, face, {
+-              xPercent: toPercent(obj.left!, W),
+-              yPercent: toPercent(obj.top!,  H),
+-              rotation: obj.angle ?? 0,
+-              scaleX:   obj.scaleX ?? 1,
+-              scaleY:   obj.scaleY ?? 1,
+-            });
++    const { placements, addPlacement, updatePlacement } = useEditorStore();
++
++    // Accessory catalogue lookup — needed to reconstruct a placement's
++    // cutout image/type/real dimensions when restoring a saved design
++    // (a placement only stores accessoryId, not the accessory's own data).
++    const allAccessories = useQuery(api.accessories.listAccessories, {});
++    const accessoryLookup = useMemo(() => {
++      const map = new Map<string, AccessoryForCanvas>();
++      for (const acc of allAccessories ?? []) {
++        map.set(acc._id, {
++          id: acc._id,
++          cutoutUrl: acc.cutoutUrl,
++          widthMm: acc.widthMm,
++          heightMm: acc.heightMm,
++          type: acc.type,
++        });
++      }
++      return map;
++    }, [allAccessories]);
++
++    const setCanvasElRef = useCallback(
++      (viewId: string) => (el: HTMLCanvasElement | null) => {
++        if (el) canvasElRefs.current.set(viewId, el);
++      },
++      []
++    );
++
++    // ── Fit-to-container viewport transform (VIEW SPACE only) ─────────────
++    const fitToContainer = useCallback((viewId: string) => {
++      const fc = fabricRefs.current.get(viewId);
++      const container = containerRef.current;
++      if (!fc || !container) return;
++
++      const cw = container.clientWidth;
++      const ch = container.clientHeight;
++      if (!cw || !ch) return;
++
++      const worldW = fc.getWidth();
++      const worldH = fc.getHeight();
++      const zoom = Math.min(cw / worldW, ch / worldH) * 0.94; // small padding
++      fitZoomRefs.current.set(viewId, zoom);
++
++      const panX = (cw - worldW * zoom) / 2;
++      const panY = (ch - worldH * zoom) / 2;
++
++      fc.setViewportTransform([zoom, 0, 0, zoom, panX, panY]);
++      fc.renderAll();
++    }, []);
++
++    const recenter = useCallback(() => {
++      if (activeViewId) fitToContainer(activeViewId);
++    }, [activeViewId, fitToContainer]);
++
++    // ── Initialise a Fabric canvas for one view, world-space sized ─────────
++    const initView = useCallback(
++      async (view: EditorView) => {
++        if (fabricRefs.current.has(view.viewId) || initializingRefs.current.has(view.viewId)) return;
++        const el = canvasElRefs.current.get(view.viewId);
++        if (!el) return;
++        initializingRefs.current.add(view.viewId);
++
++        const { Canvas, FabricImage, Point } = await import("fabric");
++
++        const bgUrl = cld(view.publicId, "full");
++        const bgImg = await FabricImage.fromURL(bgUrl, { crossOrigin: "anonymous" });
++
++        // The canvas element itself IS world space — sized to exactly match
++        // this photo's delivered pixel dimensions. No scaling of the
++        // background is needed or wanted.
++        const worldW = bgImg.width!;
++        const worldH = bgImg.height!;
++
++        const fc = new Canvas(el, {
++          width: worldW,
++          height: worldH,
++          selection: true,
++          preserveObjectStacking: true,
++          backgroundColor: "#FFFFFF",
++        });
++
++        bgImg.set({
++          left: 0,
++          top: 0,
++          selectable: false,
++          evented: false,
++          excludeFromExport: false,
++        });
++        fc.add(bgImg);
++        fc.sendObjectToBack(bgImg);
++
++        // Self-calibrating px-per-mm for this exact photo. Null if this
++        // view hasn't been measured yet — addAccessoryToCanvas falls back
++        // to a fixed relative size in that case rather than crash.
++        const calibration = computePxPerMm(worldW, worldH, view.maxWidthMm, view.maxHeightMm);
++        pxPerMmRefs.current.set(view.viewId, calibration?.avg ?? 0);
++
++        // Pan by dragging empty canvas (not while dragging an object)
++        let isPanning = false;
++        let lastX = 0, lastY = 0;
++        fc.on("mouse:down", (e: any) => {
++          if (e.target) return; // an object was clicked — let Fabric handle it
++          isPanning = true;
++          fc.selection = false;
++          lastX = e.e.clientX ?? e.e.touches?.[0]?.clientX ?? 0;
++          lastY = e.e.clientY ?? e.e.touches?.[0]?.clientY ?? 0;
++        });
++        fc.on("mouse:move", (e: any) => {
++          if (!isPanning) return;
++          const clientX = e.e.clientX ?? e.e.touches?.[0]?.clientX ?? 0;
++          const clientY = e.e.clientY ?? e.e.touches?.[0]?.clientY ?? 0;
++          const vpt = fc.viewportTransform;
++          vpt[4] += clientX - lastX;
++          vpt[5] += clientY - lastY;
++          fc.setViewportTransform(vpt);
++          lastX = clientX;
++          lastY = clientY;
++          fc.requestRenderAll();
++        });
++        fc.on("mouse:up", () => {
++          isPanning = false;
++          fc.selection = true;
++        });
++
++        // Scroll/trackpad zoom, clamped between fit-zoom and 4x fit-zoom
++        fc.on("mouse:wheel", (opt: any) => {
++          const delta = opt.e.deltaY;
++          let zoom = fc.getZoom() * 0.999 ** delta;
++          const fitZoom = fitZoomRefs.current.get(view.viewId) ?? zoom;
++          zoom = Math.max(fitZoom * MIN_ZOOM_MULT, Math.min(fitZoom * MAX_ZOOM_MULT, zoom));
++          fc.zoomToPoint(new Point(opt.e.offsetX, opt.e.offsetY), zoom);
++          opt.e.preventDefault();
++          opt.e.stopPropagation();
++        });
++
++        // Basic two-finger pinch-to-zoom
++        let pinchStartDist = 0;
++        let pinchStartZoom = 1;
++        el.addEventListener(
++          "touchstart",
++          (e: TouchEvent) => {
++            if (e.touches.length === 2) {
++              pinchStartDist = touchDistance(e);
++              pinchStartZoom = fc.getZoom();
++            }
++          },
++          { passive: true }
++        );
++        el.addEventListener(
++          "touchmove",
++          (e: TouchEvent) => {
++            if (e.touches.length === 2 && pinchStartDist > 0) {
++              const dist = touchDistance(e);
++              const fitZoom = fitZoomRefs.current.get(view.viewId) ?? 1;
++              let zoom = pinchStartZoom * (dist / pinchStartDist);
++              zoom = Math.max(fitZoom * MIN_ZOOM_MULT, Math.min(fitZoom * MAX_ZOOM_MULT, zoom));
++              const rect = el.getBoundingClientRect();
++              const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
++              const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
++              fc.zoomToPoint(new Point(midX, midY), zoom);
++            }
++          },
++          { passive: true }
++        );
++
++        // Persist position/rotation/scale (WORLD SPACE, mm) when an object
++        // finishes being moved/rotated/resized.
++        fc.on("object:modified", (e: any) => {
++          const obj = e.target;
++          if (!obj?.placementId) return;
++          const pxPerMm = pxPerMmRefs.current.get(view.viewId) || 1;
++          updatePlacement(obj.placementId, {
++            xMm: pxToMm(obj.left!, pxPerMm),
++            yMm: pxToMm(obj.top!, pxPerMm),
++            rotation: obj.angle ?? 0,
++            scaleX: obj.scaleX ?? 1,
++            scaleY: obj.scaleY ?? 1,
+           });
++        });
+ 
+-          fc.renderAll();
+-          return fc;
+-        }
++        // Clamp bounded accessories (e.g. DTF stickers) to their allowed
++        // real-world size range while actively resizing.
++        fc.on("object:scaling", (e: any) => {
++          const obj = e.target;
++          const bounds = obj?.__sizeBoundsPx;
++          if (!bounds) return;
++          const w = (obj.width ?? 0) * obj.scaleX;
++          const h = (obj.height ?? 0) * obj.scaleY;
++          if (w < bounds.minW) obj.scaleX = bounds.minW / obj.width;
++          if (w > bounds.maxW) obj.scaleX = bounds.maxW / obj.width;
++          if (h < bounds.minH) obj.scaleY = bounds.minH / obj.height;
++          if (h > bounds.maxH) obj.scaleY = bounds.maxH / obj.height;
++        });
++
++        fabricRefs.current.set(view.viewId, fc);
++        fc.renderAll();
++        setReadyViewIds((prev) => new Set(prev).add(view.viewId));
++        initializingRefs.current.delete(view.viewId);
++
++        // Fit once layout has settled (container has real dimensions)
++        requestAnimationFrame(() => fitToContainer(view.viewId));
++      },
++      [fitToContainer, updatePlacement]
++    );
+ 
+-        frontFabric.current = await makeCanvas(frontCanvasEl.current, frontImagePublicId);
+-        if (backImagePublicId) {
+-          backFabric.current = await makeCanvas(backCanvasEl.current, backImagePublicId);
++    // Initialise the active view's canvas the moment its <canvas> element exists
++    useEffect(() => {
++      const view = views.find((v) => v.viewId === activeViewId);
++      if (view) initView(view);
++    }, [activeViewId, views, initView]);
++
++    // Re-fit on container resize — orientation change, sidebar toggle,
++    // browser window resize, anything. This is what makes the canvas
++    // genuinely responsive rather than fixed at whatever size it was on mount.
++    useEffect(() => {
++      const container = containerRef.current;
++      if (!container) return;
++      const ro = new ResizeObserver(() => {
++        if (activeViewId) fitToContainer(activeViewId);
++      });
++      ro.observe(container);
++      return () => ro.disconnect();
++    }, [activeViewId, fitToContainer]);
++
++    // Render any placements that exist in the store but aren't on canvas
++    // yet — covers both restoring a saved design on load, and view tabs
++    // that just became ready. Skips placements whose view canvas or
++    // accessory data isn't available yet; it retries automatically as
++    // those dependencies resolve (effect re-runs on their change).
++    useEffect(() => {
++      async function renderPlacements() {
++        const { FabricImage } = await import("fabric");
++        for (const placement of placements) {
++          if (renderedPlacementIds.current.has(placement.placementId)) continue;
++          const fc = fabricRefs.current.get(placement.viewId as unknown as string);
++          if (!fc) continue;
++          const accessory = accessoryLookup.get(placement.accessoryId as unknown as string);
++          if (!accessory) continue;
++
++          const pxPerMm = pxPerMmRefs.current.get(placement.viewId as unknown as string) || 1;
++          const img = await FabricImage.fromURL(accessory.cutoutUrl, { crossOrigin: "anonymous" });
++          img.set({
++            left: mmToPx(placement.xMm, pxPerMm),
++            top: mmToPx(placement.yMm, pxPerMm),
++            angle: placement.rotation,
++            scaleX: placement.scaleX,
++            scaleY: placement.scaleY,
++            cornerStyle: "circle",
++            cornerColor: "#F7FD04",
++            borderColor: "#0A0A0A",
++            cornerSize: 10,
++            transparentCorners: false,
++            placementId: placement.placementId,
++            accessoryId: placement.accessoryId,
++          } as any);
++          applyLockOrBounds(img, accessory.type, pxPerMm, accessory);
++
++          fc.add(img);
++          fc.renderAll();
++          renderedPlacementIds.current.add(placement.placementId);
+         }
+       }
++      renderPlacements();
++    }, [placements, readyViewIds, accessoryLookup]);
+ 
+-      init();
+-      return () => {
+-        isMounted = false;
+-        frontFabric.current?.dispose();
+-        backFabric.current?.dispose();
+-      };
+-    }, [frontImagePublicId, backImagePublicId]);
+-
+-    // ── Add accessory to active canvas ────────────────────────────────────
++    // ── Add a NEW accessory to the active view, sized to its real mm dims ──
+     const addAccessoryToCanvas = useCallback(
+-      async (cutoutUrl: string, accessoryId: string) => {
++      async (accessory: AccessoryForCanvas) => {
+         const { FabricImage } = await import("fabric");
+-        const fc = activeFace === "front" ? frontFabric.current : backFabric.current;
++        const fc = fabricRefs.current.get(activeViewId);
+         if (!fc) return;
+ 
+-        const W = fc.width!;
+-        const H = fc.height!;
++        const pxPerMm = pxPerMmRefs.current.get(activeViewId);
++        const img = await FabricImage.fromURL(accessory.cutoutUrl, { crossOrigin: "anonymous" });
+ 
+-        const img = await FabricImage.fromURL(cutoutUrl, { crossOrigin: "anonymous" });
++        let scaleX: number, scaleY: number;
++        if (pxPerMm) {
++          // True-to-life size, derived from the accessory's real mm dimensions.
++          scaleX = mmToPx(accessory.widthMm, pxPerMm) / img.width!;
++          scaleY = mmToPx(accessory.heightMm, pxPerMm) / img.height!;
++        } else {
++          // This view hasn't been measured yet (legacy/un-migrated product)
++          // — fall back to a fixed relative size rather than crash.
++          const worldW = fc.getWidth();
++          scaleX = scaleY = (worldW * 0.2) / img.width!;
++        }
+ 
+-        // Default size: ~20% of canvas width, centred
+-        const defaultW = W * 0.2;
+-        const scale    = defaultW / img.width!;
++        const left = fc.getWidth() / 2 - (img.width! * scaleX) / 2;
++        const top = fc.getHeight() / 2 - (img.height! * scaleY) / 2;
++        const placementId =
++          globalThis.crypto?.randomUUID?.() ?? `p_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+ 
+         img.set({
+-          left:       W / 2 - (img.width!  * scale) / 2,
+-          top:        H / 2 - (img.height! * scale) / 2,
+-          scaleX:     scale,
+-          scaleY:     scale,
+-          // Custom property so we can identify this object later
+-          accessoryId,
+-          cornerStyle: "circle",
+-          cornerColor: "#F7FD04",
+-          borderColor: "#0A0A0A",
+-          cornerSize:  10,
+-          transparentCorners: false,
++          left,
++          top,
++          scaleX,
++          scaleY,
++          placementId,
++          accessoryId: accessory.id,
+         } as any);
++        applyLockOrBounds(img, accessory.type, pxPerMm ?? 1, accessory);
+ 
+         fc.add(img);
+         fc.setActiveObject(img);
+         fc.renderAll();
+ 
+-        // Record in store
+         addPlacement({
+-          accessoryId: accessoryId as any,
+-          face:        activeFace,
+-          xPercent:    toPercent(img.left!, W),
+-          yPercent:    toPercent(img.top!,  H),
+-          rotation:    0,
+-          scaleX:      scale,
+-          scaleY:      scale,
+-          zIndex:      fc.getObjects().length,
++          placementId,
++          accessoryId: accessory.id as any,
++          viewId: activeViewId as any,
++          xMm: pxPerMm ? pxToMm(left, pxPerMm) : 0,
++          yMm: pxPerMm ? pxToMm(top, pxPerMm) : 0,
++          rotation: 0,
++          scaleX,
++          scaleY,
++          zIndex: fc.getObjects().length,
+         });
++        renderedPlacementIds.current.add(placementId);
+       },
+-      [activeFace, addPlacement]
++      [activeViewId, addPlacement]
+     );
+ 
+-    // ── Export canvas as JPEG Blob ─────────────────────────────────────────
+-    const exportPNG = useCallback(
+-      async (face: "front" | "back"): Promise<Blob | null> => {
+-        const fc = face === "front" ? frontFabric.current : backFabric.current;
+-        if (!fc) return null;
++    // ── Export a view as a flat JPEG, at true world-space resolution ──────
++    // (decoupled from whatever zoom/pan the user currently has on screen —
++    // this is what makes print/production-accurate export possible later)
++    const exportPNG = useCallback(async (viewId: string): Promise<Blob | null> => {
++      const fc = fabricRefs.current.get(viewId);
++      if (!fc) return null;
+ 
+-        return new Promise((resolve) => {
+-          fc.renderAll();
+-          const dataUrl = fc.toDataURL({ format: "jpeg", quality: 0.85, multiplier: 2 });
+-          fetch(dataUrl)
+-            .then((r) => r.blob())
+-            .then(resolve)
+-            .catch(() => resolve(null));
+-        });
+-      },
+-      []
+-    );
++      const prevVpt = fc.viewportTransform;
++      fc.setViewportTransform([1, 0, 0, 1, 0, 0]);
++      fc.renderAll();
++      const dataUrl = fc.toDataURL({ format: "jpeg", quality: 0.85, multiplier: 1 });
++      fc.setViewportTransform(prevVpt);
++      fc.renderAll();
++
++      return fetch(dataUrl)
++        .then((r) => r.blob())
++        .catch(() => null);
++    }, []);
+ 
+-    // ── Expose methods to parent via ref ──────────────────────────────────
+-    useImperativeHandle(ref, () => ({ exportPNG, addAccessoryToCanvas }), [
++    useImperativeHandle(ref, () => ({ exportPNG, addAccessoryToCanvas, recenter }), [
+       exportPNG,
+       addAccessoryToCanvas,
++      recenter,
+     ]);
+ 
+     return (
+-      <div ref={containerRef} className="relative w-full h-full bg-white">
+-        {/* Front canvas */}
+-        <canvas
+-          ref={frontCanvasEl}
+-          className="absolute inset-0"
+-          style={{ display: activeFace === "front" ? "block" : "none" }}
+-        />
+-        {/* Back canvas */}
+-        {backImagePublicId && (
++      <div ref={containerRef} className="relative w-full h-full bg-white overflow-hidden touch-none">
++        {views.map((view) => (
+           <canvas
+-            ref={backCanvasEl}
++            key={view.viewId}
++            ref={setCanvasElRef(view.viewId)}
+             className="absolute inset-0"
+-            style={{ display: activeFace === "back" ? "block" : "none" }}
++            style={{ display: activeViewId === view.viewId ? "block" : "none" }}
+           />
+-        )}
++        ))}
++        <button
++          type="button"
++          onClick={recenter}
++          aria-label="Re-centre"
++          className="absolute bottom-4 right-4 z-10 w-10 h-10 flex items-center justify-center bg-white border border-black rounded-full shadow-sm active:scale-95 transition-transform"
++        >
++          <RefreshCw size={18} strokeWidth={2} />
++        </button>
+       </div>
+     );
+   }
+diff --git a/src/components/editor/EditorShell.tsx b/src/components/editor/EditorShell.tsx
+index 83541ca..e2dac81 100644
+--- a/src/components/editor/EditorShell.tsx
++++ b/src/components/editor/EditorShell.tsx
+@@ -7,7 +7,7 @@ import { Plus, ChevronLeft } from "lucide-react";
+ import { api } from "../../../convex/_generated/api";
+ import { useEditorStore } from "../../store/editorStore";
+ import { useToast } from "@/components/ui/toast";
+-import { EditorCanvas, type EditorCanvasHandle } from "./EditorCanvas";
++import { EditorCanvas, type EditorCanvasHandle, type EditorView } from "./EditorCanvas";
+ import { AccessorySheet } from "./AccessorySheet";
+ import { Button } from "@/components/ui/button";
+ import type { Id } from "../../../convex/_generated/dataModel";
+@@ -21,42 +21,56 @@ interface ProductInfo {
+ 
+ interface EditorShellProps {
+   product: ProductInfo;
+-  frontImagePublicId: string;
+-  backImagePublicId: string;
++  views: EditorView[];   // any number of customisable sides — front/back/left/right/top/...
+   existingDesignId?: Id<"custom_designs">;
+ }
+ 
+-export function EditorShell({
+-  product,
+-  frontImagePublicId,
+-  backImagePublicId,
+-  existingDesignId,
+-}: EditorShellProps) {
++export function EditorShell({ product, views, existingDesignId }: EditorShellProps) {
+   const router    = useRouter();
+   const { toast } = useToast();
+   const canvasRef = useRef<EditorCanvasHandle>(null);
+ 
+   const {
+-    activeFace, setActiveFace,
++    activeViewId, setActiveViewId,
+     placements, isDirty,
+     isBottomSheetOpen, openBottomSheet, closeBottomSheet,
+     setDesignId, designId, isSaving, setIsSaving, markSaved,
+-    resetEditor,
++    setPlacements, resetEditor,
+   } = useEditorStore();
+ 
+   const upsertDesign   = useMutation(api.designs.upsertDesign);
+   const saveToWardrobe = useMutation(api.designs.saveDesignToWardrobe);
+   const genUploadSig   = useAction(api.cloudinary.generateUploadSignature);
+ 
++  // Load the existing design (if any) so reopening a saved design shows
++  // its placements instead of a blank canvas.
++  const existingDesign = useQuery(
++    api.designs.getDesign,
++    existingDesignId ? { designId: existingDesignId } : "skip"
++  );
++
+   useEffect(() => {
+     resetEditor();
+     useEditorStore.getState().setProductId(product._id);
++    if (views[0]) useEditorStore.getState().setActiveViewId(views[0].viewId as Id<"product_images">);
+     if (existingDesignId) setDesignId(existingDesignId);
+     return () => resetEditor();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [product._id]);
+ 
++  // Once the saved design has loaded, populate the store's placements.
++  // Guarded so this only happens once per design (not on every re-render,
++  // and not overwriting the user's in-progress edits).
++  const loadedDesignRef = useRef<string | null>(null);
++  useEffect(() => {
++    if (!existingDesign) return;
++    if (loadedDesignRef.current === existingDesign._id) return;
++    loadedDesignRef.current = existingDesign._id;
++    setPlacements(existingDesign.placements as any);
++  }, [existingDesign, setPlacements]);
++
+   // Auto-save debounced
+-  const autoSaveTimer = useRef<ReturnType<typeof setTimeout>>();
++  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+   useEffect(() => {
+     if (!isDirty) return;
+     clearTimeout(autoSaveTimer.current);
+@@ -78,10 +92,10 @@ export function EditorShell({
+     return () => clearTimeout(autoSaveTimer.current);
+   }, [isDirty, placements]);
+ 
+-  async function uploadPreview(blob: Blob, face: "front" | "back"): Promise<string> {
++  async function uploadPreview(blob: Blob, slug: string): Promise<string> {
+     const sig = await genUploadSig({ folder: "blax-sheep/designs" });
+     const fd  = new FormData();
+-    fd.append("file",           blob,             `preview-${face}.jpg`);
++    fd.append("file",           blob,             `preview-${slug}.jpg`);
+     fd.append("api_key",        sig.apiKey ?? "");
+     fd.append("timestamp",      String(sig.timestamp));
+     fd.append("signature",      sig.signature);
+@@ -103,12 +117,17 @@ export function EditorShell({
+       const state = useEditorStore.getState();
+       if (!state.productId) throw new Error("No product.");
+ 
+-      const frontBlob = await canvasRef.current.exportPNG("front");
++      // Export front + back if present (used for the wardrobe thumbnail);
++      // other sides (left/right/cap-top etc.) aren't needed for the preview.
++      const front = views.find((v) => v.slug === "front") ?? views[0];
++      const back  = views.find((v) => v.slug === "back");
++
++      const frontBlob = front ? await canvasRef.current.exportPNG(front.viewId) : null;
+       const frontPublicId = frontBlob ? await uploadPreview(frontBlob, "front") : undefined;
+ 
+       let backPublicId: string | undefined;
+-      if (backImagePublicId) {
+-        const backBlob = await canvasRef.current.exportPNG("back");
++      if (back) {
++        const backBlob = await canvasRef.current.exportPNG(back.viewId);
+         if (backBlob) backPublicId = await uploadPreview(backBlob, "back");
+       }
+ 
+@@ -129,8 +148,6 @@ export function EditorShell({
+     }
+   }
+ 
+-  const hasBothFaces = !!frontImagePublicId && !!backImagePublicId;
+-
+   return (
+     <div className="min-h-screen bg-white flex flex-col">
+       {/* Header */}
+@@ -143,15 +160,15 @@ export function EditorShell({
+           Back
+         </button>
+ 
+-        {hasBothFaces && (
+-          <div className="flex absolute left-1/2 -translate-x-1/2">
+-            {(["front", "back"] as const).map((face, i) => (
++        {views.length > 1 && (
++          <div className="flex absolute left-1/2 -translate-x-1/2 overflow-x-auto max-w-[60vw]">
++            {views.map((view, i) => (
+               <button
+-                key={face}
+-                onClick={() => setActiveFace(face)}
+-                className={`px-4 py-1 font-mono text-xs font-bold uppercase tracking-wider border border-black transition-all ${i === 1 ? "border-l-0" : ""} ${activeFace === face ? "bg-black text-yellow" : "bg-white text-black"}`}
++                key={view.viewId}
++                onClick={() => setActiveViewId(view.viewId as Id<"product_images">)}
++                className={`px-4 py-1 font-mono text-xs font-bold uppercase tracking-wider border border-black transition-all whitespace-nowrap ${i > 0 ? "border-l-0" : ""} ${activeViewId === view.viewId ? "bg-black text-yellow" : "bg-white text-black"}`}
+               >
+-                {face}
++                {view.label}
+               </button>
+             ))}
+           </div>
+@@ -161,12 +178,9 @@ export function EditorShell({
+ 
+       {/* Canvas */}
+       <div className="flex-1 relative overflow-hidden">
+-        <EditorCanvas
+-          ref={canvasRef}
+-          frontImagePublicId={frontImagePublicId}
+-          backImagePublicId={backImagePublicId}
+-          activeFace={activeFace}
+-        />
++        {activeViewId && (
++          <EditorCanvas ref={canvasRef} views={views} activeViewId={activeViewId} />
++        )}
+       </div>
+ 
+       {/* Add to Wardrobe */}
+@@ -190,7 +204,7 @@ export function EditorShell({
+       <AccessorySheet
+         isOpen={isBottomSheetOpen}
+         onClose={closeBottomSheet}
+-        onAddToCanvas={(url, id) => canvasRef.current?.addAccessoryToCanvas(url, id)}
++        onAddToCanvas={(accessory) => canvasRef.current?.addAccessoryToCanvas(accessory)}
+       />
+     </div>
+   );
+diff --git a/src/components/wardrobe/WardrobeItem.tsx b/src/components/wardrobe/WardrobeItem.tsx
+index a823cac..1dca08b 100644
+--- a/src/components/wardrobe/WardrobeItem.tsx
++++ b/src/components/wardrobe/WardrobeItem.tsx
+@@ -50,7 +50,7 @@ interface WardrobeItemData {
+     totalAccessoryCost: number;
+     placements: Array<{
+       accessoryId: Id<"accessories">;
+-      face: "front" | "back";
++      viewId: Id<"product_images">;
+     }>;
+   } | null;
+ }
+diff --git a/src/lib/utils.ts b/src/lib/utils.ts
+index 1bbc1f7..80386ad 100644
+--- a/src/lib/utils.ts
++++ b/src/lib/utils.ts
+@@ -125,14 +125,67 @@ export function calculateWardrobeTotal(
+   }, 0);
+ }
+ 
+-// ─── Editor: convert pixel position to percentage ────────────────────────────
+-// The editor stores positions as percentages so designs work on any screen.
+-export function toPercent(value: number, total: number): number {
+-  return Math.round((value / total) * 10000) / 100;  // 2 decimal places
++// ─── Editor: world-space calibration (mm ↔ px) ───────────────────────────────
++//
++// Plain English:
++// Every product photo is taken with the same camera at the same distance,
++// so pixels-per-millimetre is effectively constant across the whole
++// catalogue. Rather than trust one hardcoded constant forever (which would
++// silently drift if a photo is framed slightly differently, or if
++// Cloudinary's delivery pipeline resizes an image), we derive it FRESH from
++// each photo: its own delivered pixel width divided by the real max-width
++// (mm) that was measured for that exact pose before the shot. Same formula
++// for height as an independent cross-check.
++//
++// This is what lets accessory sizes and garment sizes render at true
++// relative scale, and what lets accessory position be stored in mm
++// (device-independent) instead of a percentage of on-screen canvas pixels
++// (which breaks under letterboxing / different viewport sizes).
++
++export interface PxPerMm {
++  x: number;
++  y: number;
++  /** Single scalar to use for isotropic (uniform) scaling — the average of x and y. */
++  avg: number;
++  /** True if the x- and y-derived values disagree by more than ~4% — a data-quality flag. */
++  isSuspect: boolean;
+ }
+ 
+-export function fromPercent(percent: number, total: number): number {
+-  return (percent / 100) * total;
++/**
++ * Derive pixels-per-millimetre for a garment photo from its own delivered
++ * pixel dimensions and the max width/height (mm) measured for that pose.
++ * Falls back gracefully (returns null) if measurement data isn't present
++ * yet — callers should degrade to a fixed relative size in that case
++ * rather than crash.
++ */
++export function computePxPerMm(
++  imagePxWidth: number,
++  imagePxHeight: number,
++  maxWidthMm?: number,
++  maxHeightMm?: number
++): PxPerMm | null {
++  if (!maxWidthMm || !maxHeightMm || maxWidthMm <= 0 || maxHeightMm <= 0) {
++    return null;
++  }
++  const x = imagePxWidth / maxWidthMm;
++  const y = imagePxHeight / maxHeightMm;
++  const avg = (x + y) / 2;
++  const isSuspect = Math.abs(x - y) / avg > 0.04;
++  if (isSuspect && typeof console !== "undefined") {
++    console.warn(
++      `[editor] px-per-mm mismatch for this photo: width-derived=${x.toFixed(3)}, height-derived=${y.toFixed(3)}. ` +
++      `Check the photo crop and the measured maxWidthMm/maxHeightMm for this view.`
++    );
++  }
++  return { x, y, avg, isSuspect };
++}
++
++export function mmToPx(mm: number, pxPerMm: number): number {
++  return mm * pxPerMm;
++}
++
++export function pxToMm(px: number, pxPerMm: number): number {
++  return px / pxPerMm;
+ }
+ 
+ // ─── Truncate text ────────────────────────────────────────────────────────────
+diff --git a/src/store/editorStore.ts b/src/store/editorStore.ts
+index 68440a1..460e9e5 100644
+--- a/src/store/editorStore.ts
++++ b/src/store/editorStore.ts
+@@ -13,22 +13,30 @@ import type { Id } from "../../convex/_generated/dataModel";
+  * Only THEN does it become server state.
+  *
+  * What lives here:
+- * - Which face is active (front/back) — controls which canvas is shown
+- * - The Fabric.js placement objects — positions of accessories on the canvas
++ * - Which view/side is active (front/back/left/right/...) — controls
++ *   which garment photo + canvas is shown. A product can have any number
++ *   of views (a cap might have 5), not just two.
++ * - The placement objects — WORLD-SPACE (millimetre) positions of
++ *   accessories, independent of screen size or zoom level.
+  * - Whether there are unsaved changes (isDirty) — controls the save button state
+  * - Which accessory category tab is open in the bottom sheet
+  * - Whether the accessory picker sheet is open
++ *
++ * Note on placementId: a placement is uniquely identified by a
++ * client-generated placementId (NOT by accessoryId), so the SAME accessory
++ * can be placed more than once on the same view (e.g. two identical pins).
+  */
+ 
+ export interface PlacementData {
++  placementId: string;               // unique per placement, e.g. crypto.randomUUID()
+   accessoryId: Id<"accessories">;
+-  face: "front" | "back";
+-  xPercent: number;
+-  yPercent: number;
+-  rotation: number;
+-  scaleX: number;
++  viewId: Id<"product_images">;      // which garment view/side this sits on
++  xMm: number;                        // horizontal position, mm from view origin
++  yMm: number;                        // vertical position, mm from view origin
++  rotation: number;                   // degrees
++  scaleX: number;                     // world-space scale actually applied
+   scaleY: number;
+-  zIndex: number;
++  zIndex: number;                     // layer order (for overlapping accessories)
+ }
+ 
+ interface EditorStore {
+@@ -37,7 +45,7 @@ interface EditorStore {
+   designId: Id<"custom_designs"> | null;
+ 
+   // Canvas state
+-  activeFace: "front" | "back";
++  activeViewId: Id<"product_images"> | null;
+   placements: PlacementData[];
+ 
+   // UI state
+@@ -49,10 +57,10 @@ interface EditorStore {
+   // Actions
+   setProductId: (id: Id<"products">) => void;
+   setDesignId: (id: Id<"custom_designs">) => void;
+-  setActiveFace: (face: "front" | "back") => void;
++  setActiveViewId: (viewId: Id<"product_images">) => void;
+   addPlacement: (placement: PlacementData) => void;
+-  updatePlacement: (accessoryId: Id<"accessories">, face: "front" | "back", updates: Partial<PlacementData>) => void;
+-  removePlacement: (accessoryId: Id<"accessories">, face: "front" | "back") => void;
++  updatePlacement: (placementId: string, updates: Partial<PlacementData>) => void;
++  removePlacement: (placementId: string) => void;
+   setPlacements: (placements: PlacementData[]) => void;
+   openBottomSheet: (type: string) => void;
+   closeBottomSheet: () => void;
+@@ -64,7 +72,7 @@ interface EditorStore {
+ const initialState = {
+   productId: null,
+   designId: null,
+-  activeFace: "front" as const,
++  activeViewId: null,
+   placements: [],
+   isBottomSheetOpen: false,
+   activeAccessoryType: null,
+@@ -81,7 +89,7 @@ export const useEditorStore = create<EditorStore>()(
+ 
+       setDesignId: (id) => set({ designId: id }),
+ 
+-      setActiveFace: (face) => set({ activeFace: face }),
++      setActiveViewId: (viewId) => set({ activeViewId: viewId }),
+ 
+       addPlacement: (placement) =>
+         set((state) => ({
+@@ -89,24 +97,22 @@ export const useEditorStore = create<EditorStore>()(
+           isDirty: true,
+         })),
+ 
+-      updatePlacement: (accessoryId, face, updates) =>
++      updatePlacement: (placementId, updates) =>
+         set((state) => ({
+           placements: state.placements.map((p) =>
+-            p.accessoryId === accessoryId && p.face === face
+-              ? { ...p, ...updates }
+-              : p
++            p.placementId === placementId ? { ...p, ...updates } : p
+           ),
+           isDirty: true,
+         })),
+ 
+-      removePlacement: (accessoryId, face) =>
++      removePlacement: (placementId) =>
+         set((state) => ({
+-          placements: state.placements.filter(
+-            (p) => !(p.accessoryId === accessoryId && p.face === face)
+-          ),
++          placements: state.placements.filter((p) => p.placementId !== placementId),
+           isDirty: true,
+         })),
+ 
++      // Loads placements from a saved design (or resets to empty for a new
++      // one) WITHOUT marking the store dirty — this is a load, not an edit.
+       setPlacements: (placements) =>
+         set({ placements, isDirty: false }),
+ 
+@@ -125,4 +131,4 @@ export const useEditorStore = create<EditorStore>()(
+     }),
+     { name: "editorStore" }
+   )
+-);
+\ No newline at end of file
++);

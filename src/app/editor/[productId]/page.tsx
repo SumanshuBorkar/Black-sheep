@@ -32,9 +32,13 @@ export default async function EditorPage({
 
   if (!product || !product.isCustomizable) notFound();
 
-  const frontImage = product.images?.find((img) => img.angle === "front")
-    ?? product.images?.[0];
-  const backImage  = product.images?.find((img) => img.angle === "back");
+  // A product can expose any number of customisable sides — front/back for
+  // most garments, but front/back/left/right/top for something like a cap.
+  const views = await fetchQuery(api.products.getProductEditorViews, {
+    productId: productId as Id<"products">,
+  });
+
+  if (views.length === 0) notFound();
 
   return (
     <EditorShell
@@ -44,8 +48,7 @@ export default async function EditorPage({
         slug:       product.slug,
         sellingPrice: product.sellingPrice,
       }}
-      frontImagePublicId={frontImage?.cloudinaryPublicId ?? ""}
-      backImagePublicId={backImage?.cloudinaryPublicId ?? ""}
+      views={views}
       existingDesignId={designId as Id<"custom_designs"> | undefined}
     />
   );

@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { Id } from "./_generated/dataModel";
 
 /**
  * BLAX SHEEP — Orders
@@ -26,18 +27,18 @@ async function getUserId(ctx: any): Promise<string | null> {
 // ─── MUTATION: Finalise order after payment verified ──────────────────────────
 export const finaliseOrder = mutation({
   args: {
-    razorpayOrderId:   v.string(),
+    razorpayOrderId: v.string(),
     razorpayPaymentId: v.string(),
     razorpaySignature: v.string(),
-    userId:            v.string(),
+    userId: v.string(),
     shippingAddress: v.object({
-      name:          v.string(),
-      phone:         v.string(),
-      addressLine1:  v.string(),
-      addressLine2:  v.optional(v.string()),
-      city:          v.string(),
-      state:         v.string(),
-      pincode:       v.string(),
+      name: v.string(),
+      phone: v.string(),
+      addressLine1: v.string(),
+      addressLine2: v.optional(v.string()),
+      city: v.string(),
+      state: v.string(),
+      pincode: v.string(),
     }),
     notes: v.optional(v.string()),
   },
@@ -104,31 +105,32 @@ export const finaliseOrder = mutation({
 
     for (const { product, design, primaryImage } of productData) {
       const accessoryCost = design?.totalAccessoryCost ?? 0;
-      const lineTotal     = product.sellingPrice + accessoryCost;
+      const lineTotal = product.sellingPrice + accessoryCost;
       subtotal += lineTotal;
 
       // Build accessory snapshot
       const accessories = [];
       if (design?.placements) {
         for (const placement of design.placements) {
-          const acc = await ctx.db.get(placement.accessoryId);
+          // Force the correct table type
+          const acc = await ctx.db.get(placement.accessoryId as Id<"accessories">);
           if (acc) {
             accessories.push({
-              accessoryId:    acc._id,
+              accessoryId: acc._id as Id<"accessories">,  // also cast the id
               accessoryTitle: acc.title,
-              quantity:       1,
-              unitPrice:      acc.price,
+              quantity: 1,
+              unitPrice: acc.price,
             });
           }
         }
       }
 
       orderItems.push({
-        productId:        product._id,
-        designId:         design?._id,
-        productTitle:     product.title,
-        productSize:      product.size,
-        productPrice:     product.sellingPrice,
+        productId: product._id,
+        designId: design?._id,
+        productTitle: product.title,
+        productSize: product.size,
+        productPrice: product.sellingPrice,
         accessoryCost,
         lineTotal,
         snapshotImageUrl: design?.previewFrontUrl
@@ -139,23 +141,23 @@ export const finaliseOrder = mutation({
     }
 
     const shippingCost = 100; // Flat ₹100 India Post shipping
-    const totalAmount  = subtotal + shippingCost;
+    const totalAmount = subtotal + shippingCost;
 
     // ── Create the order record ────────────────────────────────────────────
     const orderId = await ctx.db.insert("orders", {
-      userId:            args.userId,
-      razorpayOrderId:   args.razorpayOrderId,
+      userId: args.userId,
+      razorpayOrderId: args.razorpayOrderId,
       razorpayPaymentId: args.razorpayPaymentId,
       razorpaySignature: args.razorpaySignature,
-      status:            "confirmed",
-      items:             orderItems,
+      status: "confirmed",
+      items: orderItems,
       subtotal,
       shippingCost,
       totalAmount,
-      currency:          "INR",
-      shippingAddress:   args.shippingAddress,
-      notes:             args.notes,
-      updatedAt:         Date.now(),
+      currency: "INR",
+      shippingAddress: args.shippingAddress,
+      notes: args.notes,
+      updatedAt: Date.now(),
     });
 
     // ── Mark all products as SOLD ──────────────────────────────────────────
@@ -167,11 +169,12 @@ export const finaliseOrder = mutation({
     for (const { design } of productData) {
       if (!design?.placements) continue;
       for (const placement of design.placements) {
-        const acc = await ctx.db.get(placement.accessoryId);
+        const acc = await ctx.db.get(placement.accessoryId as Id<"accessories">);
         if (!acc) continue;
+
         const newStock = Math.max(0, acc.stock - 1);
-        await ctx.db.patch(placement.accessoryId, {
-          stock:  newStock,
+        await ctx.db.patch(placement.accessoryId as Id<"accessories">, {
+          stock: newStock,
           status: newStock > 0 ? "available" : "out_of_stock",
         });
       }
@@ -221,13 +224,13 @@ export const getOrderById = query({
 // ─── MUTATION: Update order status (admin) ────────────────────────────────────
 export const updateOrderStatus = mutation({
   args: {
-    orderId:    v.id("orders"),
-    status:     v.union(
+    orderId: v.id("orders"),
+    status: v.union(
       v.literal("confirmed"), v.literal("processing"),
-      v.literal("shipped"),   v.literal("delivered"),
+      v.literal("shipped"), v.literal("delivered"),
       v.literal("cancelled")
     ),
-    trackingId:  v.optional(v.string()),
+    trackingId: v.optional(v.string()),
     trackingUrl: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -242,10 +245,9 @@ export const updateOrderStatus = mutation({
 
 
 export const getAllOrders = query({
-    args: {},
-    handler: async (ctx) => {
-      const orders = await ctx.db.query("orders").collect();
-      return orders.sort((a, b) => b._creationTime - a._creationTime);
-    },
-  });
-   
+  args: {},
+  handler: async (ctx) => {
+    const orders = await ctx.db.query("orders").collect();
+    return orders.sort((a, b) => b._creationTime - a._creationTime);
+  },
+});

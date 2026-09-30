@@ -2,6 +2,7 @@
 
 import { v } from "convex/values";
 import { action } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
 import { api } from "./_generated/api";
 import { Resend } from "resend";
 
@@ -21,8 +22,8 @@ export const sendOrderConfirmation = action({
     if (!order) throw new Error("Order not found.");
 
     const itemsList = order.items
-      .map(
-        (item) =>
+    .map(
+      (item: Doc<"orders">["items"][number]) =>
           `<tr>
             <td style="padding:8px;font-family:monospace;font-size:13px;border-bottom:1px solid #eee">
               ${item.productTitle} (${item.productSize})

@@ -20,7 +20,7 @@ const DEFAULT_SLIDES: SlideData[] = [
     id: "slide-1",
     type: "image",
     src: "https://res.cloudinary.com/dtogemlki/image/upload/v1783702925/japart3_uciffp.png",       // Widescreen landscape asset
-    mobileSrc: "https://res.cloudinary.com/dtogemlki/image/upload/v1782403522/DenimPatch_wg6xqd.jpg", // Your original vertical asset
+    mobileSrc: "https://i.pinimg.com/1200x/62/2f/cb/622fcbadb78a45a9b98956d96d53c19d.jpg", // Your original vertical asset
     subheading: "50% off on stickers",
     headingText1: "Make your",
     headingText2: "own fits",
@@ -29,9 +29,21 @@ const DEFAULT_SLIDES: SlideData[] = [
   },
   {
     id: "slide-2",
-    type: "video",
-    src: "//res.cloudinary.com/dxs2abkug/video/upload/v1768833164/Earth_fbj3c1.mp4",     // Desktop video loop
-    mobileSrc: "", // Mobile optimized compressed vertical loop
+    type: "image",
+    src: "https://res.cloudinary.com/dtogemlki/image/upload/v1782403537/CloseUpDenim_v5ddbj.jpg",     // Desktop video loop
+    mobileSrc: "https://res.cloudinary.com/dtogemlki/image/upload/v1790172203/CartGirl_cfacgg.jpg", // Mobile optimized compressed vertical loop
+    subheading: "New Drops Live Now",
+    headingText1: "Thrifted &",
+    headingText2: "Reworked",
+    btnText: "Explore Collection",
+    btnLink: "/shop",
+  },
+
+  {
+    id: "slide-3",
+    type: "image",
+    src: "https://i.pinimg.com/1200x/29/16/20/291620e20f15c5416fc7bd38b2698e32.jpg",     // Desktop video loop
+    mobileSrc: "https://i.pinimg.com/1200x/29/16/20/291620e20f15c5416fc7bd38b2698e32.jpg", // Mobile optimized compressed vertical loop
     subheading: "New Drops Live Now",
     headingText1: "Thrifted &",
     headingText2: "Reworked",

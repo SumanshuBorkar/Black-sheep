@@ -6,9 +6,10 @@ import { mutation, query } from "./_generated/server";
  *
  * Plain English:
  * A "design" is the saved state of the customisation editor for one
- * product. It stores where each accessory sits on the garment (as
- * percentages so it renders correctly on any screen size) plus the
- * Cloudinary public IDs of the exported preview images.
+ * product. It stores where each accessory sits on the garment — in
+ * millimetres, relative to that garment view's own origin, so the design
+ * is device-independent and true to physical scale — plus the Cloudinary
+ * public IDs of the exported preview images.
  *
  * Flow:
  * 1. User opens editor → upsertDesign called on first auto-save (status: draft)
@@ -18,10 +19,11 @@ import { mutation, query } from "./_generated/server";
  */
 
 const placementValidator = v.object({
+  placementId: v.string(),
   accessoryId: v.id("accessories"),
-  face:        v.union(v.literal("front"), v.literal("back")),
-  xPercent:    v.number(),
-  yPercent:    v.number(),
+  viewId:      v.id("product_images"),
+  xMm:         v.number(),
+  yMm:         v.number(),
   rotation:    v.number(),
   scaleX:      v.number(),
   scaleY:      v.number(),

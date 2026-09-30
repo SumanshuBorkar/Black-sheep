@@ -11,7 +11,10 @@
 import type * as accessories from "../accessories.js";
 import type * as cloudinary from "../cloudinary.js";
 import type * as designs from "../designs.js";
+import type * as email from "../email.js";
+import type * as orders from "../orders.js";
 import type * as outfits from "../outfits.js";
+import type * as payments from "../payments.js";
 import type * as products from "../products.js";
 import type * as storage from "../storage.js";
 import type * as wardrobe from "../wardrobe.js";
@@ -26,7 +29,10 @@ declare const fullApi: ApiFromModules<{
   accessories: typeof accessories;
   cloudinary: typeof cloudinary;
   designs: typeof designs;
+  email: typeof email;
+  orders: typeof orders;
   outfits: typeof outfits;
+  payments: typeof payments;
   products: typeof products;
   storage: typeof storage;
   wardrobe: typeof wardrobe;
