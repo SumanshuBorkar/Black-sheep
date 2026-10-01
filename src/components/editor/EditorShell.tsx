@@ -158,6 +158,8 @@ export function EditorShell({ product, views, existingDesignId }: EditorShellPro
       {/* =========================================================
           HEADER
           ========================================================= */}
+          <br />
+          <br />
       <header className="header-bar shrink-0">
 
         {/* Back */}
