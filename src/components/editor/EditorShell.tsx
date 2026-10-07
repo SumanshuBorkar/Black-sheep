@@ -245,49 +245,18 @@ export function EditorShell({ product, views, existingDesignId }: EditorShellPro
       <footer
         className="
           shrink-0
-          border-t border-black
           bg-white
           px-3
           py-3
           pb-[max(0.75rem,env(safe-area-inset-bottom))]
         "
       >
-        <div className="grid grid-cols-3 gap-2">
+        <div className="flex justify-between">
 
-          {/* ADD ACCESSORY */}
-          <button
-            type="button"
-            onClick={() => openBottomSheet("embroidery_patch")}
-            className="
-              h-12
-              border border-black
-              bg-white
-              text-black
-              font-mono
-              text-xs
-              font-bold
-              uppercase
-              tracking-wider
-              flex
-              items-center
-              justify-center
-              gap-2
-              active:scale-[0.98]
-              transition-transform
-            "
-          >
-            <Plus size={18} strokeWidth={2.5} />
-            <span className="hidden sm:inline">
-              Add Accessory
-            </span>
-            <span className="sm:hidden">
-              Add
-            </span>
-          </button>
+        {/* DELETE DROP ZONE */}
 
 
-          {/* DELETE DROP ZONE */}
-          <div
+        <div
             ref={deleteZoneRef}
             className={`
               h-12
@@ -320,12 +289,27 @@ export function EditorShell({ product, views, existingDesignId }: EditorShellPro
             </span>
           </div>
 
+          {/* ADD ACCESSORY */}
+          <button
+            type="button"
+            onClick={() => openBottomSheet("embroidery_patch")}
+            className="fab"
+          >
+            <Plus size={18} strokeWidth={2.5} />
+            <span className="hidden sm:inline">
+              Add Accessory
+            </span>
+            <span className="sm:hidden">
+              Add
+            </span>
+          </button>         
+
 
           {/* SAVE */}
           <Button
             variant="primary"
             size="lg"
-            className="h-12 w-full"
+            className="h-12 w-[50vw]"
             onClick={handleAddToWardrobe}
             disabled={isSaving}
           >

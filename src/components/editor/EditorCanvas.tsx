@@ -17,34 +17,22 @@ import { cld } from "@/lib/cloudinary";
 import { computePxPerMm, mmToPx, pxToMm } from "@/lib/utils";
 
 /**
- * EditorCanvas — the Fabric.js drawing surface, in WORLD SPACE.
+ * EditorCanvas
  *
- * Plain English — the core idea:
+ * WORLD SPACE
+ * -----------
+ * Every product view has its own Fabric canvas whose dimensions match
+ * the actual source image.
  *
- * There are two coordinate systems at play, and they must never mix:
+ * VIEW SPACE
+ * ----------
+ * Fabric's viewportTransform handles:
+ * - responsive fitting
+ * - centering
+ * - zoom
+ * - pan
  *
- * 1. WORLD SPACE
- *    One Fabric canvas per garment "view" (front/back/left/right/top/...),
- *    sized to exactly match that view's photo in pixels.
- *
- *    Objects placed on it are scaled using that photo's own
- *    pixels-per-millimetre.
- *
- *    Position is stored in millimetres from the view's origin.
- *
- * 2. VIEW SPACE
- *    A zoom/pan (Fabric viewport transform) applied on top.
- *
- *    This purely fits the world canvas into whatever container size
- *    the device gives us.
- *
- *    Zooming or panning NEVER changes an object's actual
- *    left/top/scaleX/scaleY — only how much of the world is visible.
- *
- * This separation makes the editor both size-accurate and responsive.
- *
- * Each view's Fabric canvas is created lazily and then kept alive
- * when switching between view tabs.
+ * These two coordinate systems are intentionally kept separate.
  */
 
 export interface EditorView {
@@ -67,19 +55,7 @@ export interface AccessoryForCanvas {
 interface EditorCanvasProps {
   views: EditorView[];
   activeViewId: string;
-
-  /**
-   * Bottom delete drop-zone supplied by EditorShell.
-   *
-   * The canvas uses this to determine whether the currently
-   * dragged accessory is being released over the delete zone.
-   */
   deleteZoneRef?: React.RefObject<HTMLDivElement | null>;
-
-  /**
-   * Lets EditorShell highlight the delete zone while an accessory
-   * is being dragged over it.
-   */
   onDeleteTargetChange?: (isTarget: boolean) => void;
 }
 
@@ -89,11 +65,6 @@ export interface EditorCanvasHandle {
   recenter: () => void;
 }
 
-/**
- * Accessory types the customer may resize.
- *
- * Everything NOT listed here is locked to its true physical size.
- */
 const BOUNDED_TYPES: Record<string, { min: number; max: number }> = {
   dtf_sticker: { min: 0.6, max: 1.6 },
 };
@@ -101,18 +72,24 @@ const BOUNDED_TYPES: Record<string, { min: number; max: number }> = {
 const MIN_ZOOM_MULT = 1;
 const MAX_ZOOM_MULT = 4;
 
-/**
- * Fabric objects can contain custom runtime properties such as:
- *
- * - placementId
- * - accessoryId
- * - __sizeBoundsPx
- *
- * Fabric's TypeScript definitions don't know about those properties.
- *
- * Instead of accessing object.placementId directly everywhere,
- * use this small safe helper.
- */
+interface ContentBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  centerX: number;
+  centerY: number;
+}
+
+function touchDistance(e: TouchEvent): number {
+  const [a, b] = [e.touches[0], e.touches[1]];
+
+  return Math.hypot(
+    b.clientX - a.clientX,
+    b.clientY - a.clientY
+  );
+}
+
 function getPlacementId(object: unknown): string | undefined {
   if (!object || typeof object !== "object") {
     return undefined;
@@ -128,62 +105,6 @@ function getPlacementId(object: unknown): string | undefined {
   return undefined;
 }
 
-/**
- * Extract browser client coordinates from Fabric's native event.
- *
- * Supports mouse/pointer events and touch events.
- */
-function getClientPoint(event: any): {
-  clientX: number;
-  clientY: number;
-} | null {
-  if (!event) return null;
-
-  const clientX =
-    typeof event.clientX === "number"
-      ? event.clientX
-      : event.touches?.[0]?.clientX;
-
-  const clientY =
-    typeof event.clientY === "number"
-      ? event.clientY
-      : event.touches?.[0]?.clientY;
-
-  if (
-    typeof clientX !== "number" ||
-    typeof clientY !== "number"
-  ) {
-    return null;
-  }
-
-  return {
-    clientX,
-    clientY,
-  };
-}
-
-function touchDistance(e: TouchEvent): number {
-  const [a, b] = [e.touches[0], e.touches[1]];
-
-  return Math.hypot(
-    b.clientX - a.clientX,
-    b.clientY - a.clientY
-  );
-}
-
-/**
- * Apply physical-size rules to an accessory.
- *
- * Locked accessories:
- * - Move
- * - Rotate
- * - Cannot resize
- *
- * Bounded accessories:
- * - Move
- * - Rotate
- * - Resize within min/max percentage of nominal size
- */
 function applyLockOrBounds(
   img: any,
   accessoryType: string | undefined,
@@ -195,7 +116,6 @@ function applyLockOrBounds(
     : undefined;
 
   if (!bounds) {
-    // Locked: true-to-life size only.
     img.set({
       lockScalingX: true,
       lockScalingY: true,
@@ -212,670 +132,803 @@ function applyLockOrBounds(
       br: false,
       mtr: true,
     });
-  } else {
-    // Bounded accessories such as DTF stickers.
-    img.set({
-      lockScalingFlip: true,
+
+    return;
+  }
+
+  img.set({
+    lockScalingFlip: true,
+  });
+
+  img.setControlsVisibility({
+    ml: false,
+    mr: false,
+    mt: false,
+    mb: false,
+    tl: false,
+    tr: true,
+    bl: false,
+    br: true,
+    mtr: true,
+  });
+
+  if (accessory && pxPerMm) {
+    const nominalWpx = mmToPx(
+      accessory.widthMm,
+      pxPerMm
+    );
+
+    const nominalHpx = mmToPx(
+      accessory.heightMm,
+      pxPerMm
+    );
+
+    img.__sizeBoundsPx = {
+      minW: nominalWpx * bounds.min,
+      maxW: nominalWpx * bounds.max,
+      minH: nominalHpx * bounds.min,
+      maxH: nominalHpx * bounds.max,
+    };
+  }
+}
+
+/**
+ * Attempts to find the visible garment inside the source image.
+ *
+ * Most BLAX SHEEP product photos have a light/white background.
+ * We therefore detect pixels that are sufficiently different from
+ * white.
+ *
+ * If detection fails, fitToContainer() simply falls back to the
+ * full image bounds.
+ */
+function detectContentBounds(
+  imageElement: HTMLImageElement,
+  width: number,
+  height: number
+): ContentBounds | null {
+  try {
+    const sampleScale = Math.min(
+      1,
+      900 / Math.max(width, height)
+    );
+
+    const sampleWidth = Math.max(
+      1,
+      Math.floor(width * sampleScale)
+    );
+
+    const sampleHeight = Math.max(
+      1,
+      Math.floor(height * sampleScale)
+    );
+
+    const canvas = document.createElement("canvas");
+
+    canvas.width = sampleWidth;
+    canvas.height = sampleHeight;
+
+    const ctx = canvas.getContext("2d", {
+      willReadFrequently: true,
     });
 
-    img.setControlsVisibility({
-      ml: false,
-      mr: false,
-      mt: false,
-      mb: false,
-      tl: false,
-      tr: true,
-      bl: false,
-      br: true,
-      mtr: true,
-    });
-
-    if (accessory && pxPerMm) {
-      const nominalWpx = mmToPx(
-        accessory.widthMm,
-        pxPerMm
-      );
-
-      const nominalHpx = mmToPx(
-        accessory.heightMm,
-        pxPerMm
-      );
-
-      img.__sizeBoundsPx = {
-        minW: nominalWpx * bounds.min,
-        maxW: nominalWpx * bounds.max,
-        minH: nominalHpx * bounds.min,
-        maxH: nominalHpx * bounds.max,
-      };
+    if (!ctx) {
+      return null;
     }
+
+    ctx.drawImage(
+      imageElement,
+      0,
+      0,
+      sampleWidth,
+      sampleHeight
+    );
+
+    const imageData = ctx.getImageData(
+      0,
+      0,
+      sampleWidth,
+      sampleHeight
+    );
+
+    const data = imageData.data;
+
+    let minX = sampleWidth;
+    let minY = sampleHeight;
+    let maxX = -1;
+    let maxY = -1;
+
+    /*
+     * We sample every 2 pixels.
+     *
+     * A pixel is considered part of the garment if:
+     * - it isn't transparent
+     * - it isn't almost pure white
+     */
+    const step = 2;
+
+    for (let y = 0; y < sampleHeight; y += step) {
+      for (let x = 0; x < sampleWidth; x += step) {
+        const index =
+          (y * sampleWidth + x) * 4;
+
+        const r = data[index];
+        const g = data[index + 1];
+        const b = data[index + 2];
+        const a = data[index + 3];
+
+        if (a < 20) {
+          continue;
+        }
+
+        const isAlmostWhite =
+          r > 245 &&
+          g > 245 &&
+          b > 245;
+
+        if (isAlmostWhite) {
+          continue;
+        }
+
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+
+    if (
+      maxX < 0 ||
+      maxY < 0 ||
+      minX >= maxX ||
+      minY >= maxY
+    ) {
+      return null;
+    }
+
+    const scaleX = width / sampleWidth;
+    const scaleY = height / sampleHeight;
+
+    const left = minX * scaleX;
+    const top = minY * scaleY;
+    const right = (maxX + 1) * scaleX;
+    const bottom = (maxY + 1) * scaleY;
+
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      centerX: (left + right) / 2,
+      centerY: (top + bottom) / 2,
+    };
+  } catch {
+    /*
+     * CORS/security restrictions can prevent pixel inspection.
+     * In that case simply fall back to image center.
+     */
+    return null;
   }
 }
 
 export const EditorCanvas = forwardRef<
   EditorCanvasHandle,
   EditorCanvasProps
->(function EditorCanvas(
-  {
-    views,
-    activeViewId,
-    deleteZoneRef,
-    onDeleteTargetChange,
-  },
-  ref
-) {
-  /**
-   * The actual visible editor viewport.
-   */
-  const containerRef =
-    useRef<HTMLDivElement>(null);
-
-  /**
-   * One HTML canvas element per view.
-   */
-  const canvasElRefs = useRef<
-    Map<string, HTMLCanvasElement>
-  >(new Map());
-
-  /**
-   * One Fabric Canvas instance per view.
-   */
-  const fabricRefs = useRef<
-    Map<string, any>
-  >(new Map());
-
-  /**
-   * px-per-mm calibration for each view.
-   */
-  const pxPerMmRefs = useRef<
-    Map<string, number>
-  >(new Map());
-
-  /**
-   * Fit zoom for each view.
-   *
-   * Used to clamp manual zoom between:
-   *
-   * 1x fit zoom
-   * and
-   * 4x fit zoom
-   */
-  const fitZoomRefs = useRef<
-    Map<string, number>
-  >(new Map());
-
-  /**
-   * Prevents duplicate initialization.
-   */
-  const initializingRefs = useRef<
-    Set<string>
-  >(new Set());
-
-  /**
-   * Tracks which placements have already been
-   * rendered into Fabric.
-   */
-  const renderedPlacementIds = useRef<
-    Set<string>
-  >(new Set());
-
-  /**
-   * Current delete-zone hover state.
-   */
-  const deleteTargetRef =
-    useRef(false);
-
-  const [readyViewIds, setReadyViewIds] =
-    useState<Set<string>>(new Set());
-
-  const {
-    placements,
-    addPlacement,
-    updatePlacement,
-    removePlacement,
-  } = useEditorStore();
-
-  /**
-   * Accessory catalogue lookup.
-   *
-   * Used when restoring saved placements because a placement
-   * only stores accessoryId.
-   */
-  const allAccessories = useQuery(
-    api.accessories.listAccessories,
-    {}
-  );
-
-  const accessoryLookup = useMemo(() => {
-    const map = new Map<
-      string,
-      AccessoryForCanvas
-    >();
-
-    for (const acc of allAccessories ?? []) {
-      map.set(acc._id, {
-        id: acc._id,
-        cutoutUrl: acc.cutoutUrl,
-        widthMm: acc.widthMm,
-        heightMm: acc.heightMm,
-        type: acc.type,
-      });
-    }
-
-    return map;
-  }, [allAccessories]);
-
-  /**
-   * Returns true when the browser pointer is currently
-   * inside the footer delete zone.
-   */
-  const isPointerInsideDeleteZone =
-    useCallback(
-      (event: any) => {
-        const zone =
-          deleteZoneRef?.current;
-
-        if (!zone) {
-          return false;
-        }
-
-        const rect =
-          zone.getBoundingClientRect();
-
-        const point =
-          getClientPoint(event);
-
-        if (!point) {
-          return false;
-        }
-
-        return (
-          point.clientX >= rect.left &&
-          point.clientX <= rect.right &&
-          point.clientY >= rect.top &&
-          point.clientY <= rect.bottom
-        );
-      },
-      [deleteZoneRef]
-    );
-
-  /**
-   * Deletes the currently selected Fabric object
-   * and its corresponding Zustand placement.
-   */
-  const deleteSelectedAccessory =
-    useCallback(
-      (fc: any) => {
-        const activeObject =
-          fc.getActiveObject();
-
-        const placementId =
-          getPlacementId(activeObject);
-
-        if (!placementId) {
-          return;
-        }
-
-        /**
-         * Remove from Fabric first.
-         */
-        fc.remove(activeObject);
-
-        fc.discardActiveObject();
-
-        fc.requestRenderAll();
-
-        /**
-         * Remove from application state.
-         */
-        removePlacement(placementId);
-
-        /**
-         * Prevent the renderer from bringing
-         * the deleted placement back.
-         */
-        renderedPlacementIds.current.delete(
-          placementId
-        );
-
-        /**
-         * Reset delete-zone visual state.
-         */
-        deleteTargetRef.current = false;
-
-        onDeleteTargetChange?.(false);
-      },
-      [
-        removePlacement,
-        onDeleteTargetChange,
-      ]
-    );
-
-  /**
-   * React ref callback for each canvas element.
-   */
-  const setCanvasElRef =
-    useCallback(
-      (viewId: string) =>
-        (el: HTMLCanvasElement | null) => {
-          if (el) {
-            canvasElRefs.current.set(
-              viewId,
-              el
-            );
-          }
-        },
-      []
-    );
-
-  /**
-   * Fit the world-space Fabric canvas inside
-   * the available viewport.
-   *
-   * IMPORTANT:
-   *
-   * This changes ONLY the viewport transform.
-   *
-   * It does NOT change:
-   * - object left/top
-   * - object scale
-   * - object dimensions
-   * - mm measurements
-   */
-  const fitToContainer =
-    useCallback(
-      (viewId: string) => {
-        const fc =
-          fabricRefs.current.get(
-            viewId
-          );
-
-        const container =
-          containerRef.current;
-
-        if (!fc || !container) {
-          return;
-        }
-
-        const cw =
-          container.clientWidth;
-
-        const ch =
-          container.clientHeight;
-
-        if (cw <= 0 || ch <= 0) {
-          return;
-        }
-
-        const worldW =
-          fc.getWidth();
-
-        const worldH =
-          fc.getHeight();
-
-        if (worldW <= 0 || worldH <= 0) {
-          return;
-        }
-
-        /**
-         * Breathing room around the garment.
-         */
-        const paddingX = Math.min(
-          32,
-          cw * 0.06
-        );
-
-        const paddingY = Math.min(
-          32,
-          ch * 0.06
-        );
-
-        const availableW =
-          Math.max(
-            1,
-            cw - paddingX * 2
-          );
-
-        const availableH =
-          Math.max(
-            1,
-            ch - paddingY * 2
-          );
-
-        /**
-         * Fit the complete garment.
-         */
-        const zoom = Math.min(
-          availableW / worldW,
-          availableH / worldH
-        );
-
-        fitZoomRefs.current.set(
-          viewId,
-          zoom
-        );
-
-        const renderedW =
-          worldW * zoom;
-
-        const renderedH =
-          worldH * zoom;
-
-        /**
-         * Centre the world-space canvas.
-         */
-        const panX =
-          (cw - renderedW) / 2;
-
-        const panY =
-          (ch - renderedH) / 2;
-
-        fc.setViewportTransform([
-          zoom,
-          0,
-          0,
-          zoom,
-          panX,
-          panY,
-        ]);
-
-        fc.renderAll();
-      },
-      []
-    );
-
-  /**
-   * Re-centre the currently active view.
-   */
-  const recenter =
-    useCallback(() => {
-      if (activeViewId) {
-        fitToContainer(
-          activeViewId
-        );
-      }
-    }, [
+>(
+  function EditorCanvas(
+    {
+      views,
       activeViewId,
-      fitToContainer,
-    ]);
+      deleteZoneRef,
+      onDeleteTargetChange,
+    },
+    ref
+  ) {
+    const containerRef =
+      useRef<HTMLDivElement>(null);
 
-  /**
-   * Initialise one Fabric canvas.
-   *
-   * Each view gets its own world-space canvas.
-   */
-  const initView =
-    useCallback(
-      async (view: EditorView) => {
-        /**
-         * Already initialized or currently initializing.
-         */
-        if (
-          fabricRefs.current.has(
-            view.viewId
-          ) ||
-          initializingRefs.current.has(
-            view.viewId
-          )
-        ) {
-          return;
-        }
+    const canvasElRefs =
+      useRef<Map<string, HTMLCanvasElement>>(
+        new Map()
+      );
 
-        const el =
-          canvasElRefs.current.get(
-            view.viewId
-          );
+    const fabricRefs =
+      useRef<Map<string, any>>(new Map());
 
-        if (!el) {
-          return;
-        }
+    const pxPerMmRefs =
+      useRef<Map<string, number>>(new Map());
 
-        initializingRefs.current.add(
-          view.viewId
+    const fitZoomRefs =
+      useRef<Map<string, number>>(new Map());
+
+    const contentBoundsRefs =
+      useRef<Map<string, ContentBounds | null>>(
+        new Map()
+      );
+
+    const initializingRefs =
+      useRef<Set<string>>(new Set());
+
+    const renderedPlacementIds =
+      useRef<Set<string>>(new Set());
+
+    const deleteTargetRef =
+      useRef(false);
+
+    const [readyViewIds, setReadyViewIds] =
+      useState<Set<string>>(new Set());
+
+    const {
+      placements,
+      addPlacement,
+      updatePlacement,
+      removePlacement,
+    } = useEditorStore();
+
+    const allAccessories = useQuery(
+      api.accessories.listAccessories,
+      {}
+    );
+
+    const accessoryLookup = useMemo(() => {
+      const map =
+        new Map<string, AccessoryForCanvas>();
+
+      for (const acc of allAccessories ?? []) {
+        map.set(acc._id, {
+          id: acc._id,
+          cutoutUrl: acc.cutoutUrl,
+          widthMm: acc.widthMm,
+          heightMm: acc.heightMm,
+          type: acc.type,
+        });
+      }
+
+      return map;
+    }, [allAccessories]);
+
+    /*
+     * ---------------------------------------------------------
+     * FABRIC VIEW VISIBILITY
+     * ---------------------------------------------------------
+     *
+     * Fabric creates:
+     *
+     * .canvas-container
+     *   ├── lower canvas
+     *   └── upper canvas
+     *
+     * Hiding the React <canvas> alone is therefore insufficient.
+     *
+     * We explicitly hide/show Fabric's wrapper instead.
+     */
+    const syncCanvasVisibility = useCallback(
+      (activeId: string) => {
+        fabricRefs.current.forEach(
+          (fc, viewId) => {
+            if (!fc?.wrapperEl) {
+              return;
+            }
+
+            fc.wrapperEl.style.display =
+              viewId === activeId
+                ? "block"
+                : "none";
+          }
         );
+      },
+      []
+    );
 
-        try {
-          const {
-            Canvas,
-            FabricImage,
-            Point,
-          } = await import("fabric");
+    const isPointerInsideDeleteZone =
+      useCallback(
+        (event: any) => {
+          const zone =
+            deleteZoneRef?.current;
 
-          /**
-           * Load garment image.
-           */
-          const bgUrl = cld(
-            view.publicId,
-            "full"
+          if (!zone) {
+            return false;
+          }
+
+          const rect =
+            zone.getBoundingClientRect();
+
+          const clientX =
+            event?.clientX ??
+            event?.touches?.[0]?.clientX;
+
+          const clientY =
+            event?.clientY ??
+            event?.touches?.[0]?.clientY;
+
+          if (
+            typeof clientX !== "number" ||
+            typeof clientY !== "number"
+          ) {
+            return false;
+          }
+
+          return (
+            clientX >= rect.left &&
+            clientX <= rect.right &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom
+          );
+        },
+        [deleteZoneRef]
+      );
+
+    const deleteSelectedAccessory =
+      useCallback(
+        (fc: any) => {
+          const activeObject =
+            fc.getActiveObject();
+
+          const placementId =
+            getPlacementId(activeObject);
+
+          if (!placementId) {
+            return;
+          }
+
+          fc.remove(activeObject);
+          fc.discardActiveObject();
+          fc.requestRenderAll();
+
+          removePlacement(placementId);
+
+          renderedPlacementIds.current.delete(
+            placementId
           );
 
-          const bgImg =
-            await FabricImage.fromURL(
-              bgUrl,
-              {
-                crossOrigin:
-                  "anonymous",
-              }
-            );
+          deleteTargetRef.current = false;
 
-          /**
-           * WORLD SPACE.
-           *
-           * The Fabric canvas exactly matches
-           * the source garment image dimensions.
+          onDeleteTargetChange?.(false);
+        },
+        [
+          removePlacement,
+          onDeleteTargetChange,
+        ]
+      );
+
+    const setCanvasElRef =
+      useCallback(
+        (viewId: string) =>
+          (el: HTMLCanvasElement | null) => {
+            if (el) {
+              canvasElRefs.current.set(
+                viewId,
+                el
+              );
+            }
+          },
+        []
+      );
+
+    /*
+     * ---------------------------------------------------------
+     * FIT + CENTER
+     * ---------------------------------------------------------
+     */
+    const fitToContainer =
+      useCallback(
+        (viewId: string) => {
+          const fc =
+            fabricRefs.current.get(viewId);
+
+          const container =
+            containerRef.current;
+
+          if (!fc || !container) {
+            return;
+          }
+
+          /*
+           * Make sure this is the visible Fabric canvas.
            */
+          syncCanvasVisibility(viewId);
+
+          const cw =
+            container.clientWidth;
+
+          const ch =
+            container.clientHeight;
+
+          if (cw <= 0 || ch <= 0) {
+            return;
+          }
+
           const worldW =
-            bgImg.width!;
+            fc.getWidth();
 
           const worldH =
-            bgImg.height!;
+            fc.getHeight();
 
-          const fc = new Canvas(el, {
-            width: worldW,
-            height: worldH,
-            selection: true,
-            preserveObjectStacking: true,
-            backgroundColor:
-              "#FFFFFF",
-          });
+          if (
+            worldW <= 0 ||
+            worldH <= 0
+          ) {
+            return;
+          }
 
-          /**
-           * Garment background.
+          /*
+           * Small breathing room around the source image.
            */
-          bgImg.set({
-            left: 0,
-            top: 0,
-            selectable: false,
-            evented: false,
-            excludeFromExport: false,
-          });
+          const paddingX =
+            Math.min(32, cw * 0.06);
 
-          fc.add(bgImg);
+          const paddingY =
+            Math.min(32, ch * 0.06);
 
-          fc.sendObjectToBack(bgImg);
-
-          /**
-           * Calculate physical scale.
-           */
-          const calibration =
-            computePxPerMm(
-              worldW,
-              worldH,
-              view.maxWidthMm,
-              view.maxHeightMm
+          const availableW =
+            Math.max(
+              1,
+              cw - paddingX * 2
             );
 
-          pxPerMmRefs.current.set(
-            view.viewId,
-            calibration?.avg ?? 0
-          );
+          const availableH =
+            Math.max(
+              1,
+              ch - paddingY * 2
+            );
 
-          /**
-           * ───────────────────────────────
-           * Empty-canvas panning
-           * ───────────────────────────────
+          /*
+           * Fit the WHOLE product image.
            */
-          let isPanning = false;
-
-          let lastX = 0;
-          let lastY = 0;
-
-          fc.on(
-            "mouse:down",
-            (e: any) => {
-              /**
-               * If an object was clicked,
-               * Fabric handles the interaction.
-               */
-              if (e.target) {
-                return;
-              }
-
-              isPanning = true;
-
-              fc.selection = false;
-
-              const point =
-                getClientPoint(e.e);
-
-              lastX =
-                point?.clientX ?? 0;
-
-              lastY =
-                point?.clientY ?? 0;
-            }
+          const zoom = Math.min(
+            availableW / worldW,
+            availableH / worldH
           );
 
-          fc.on(
-            "mouse:move",
-            (e: any) => {
-              if (!isPanning) {
-                return;
-              }
+          fitZoomRefs.current.set(
+            viewId,
+            zoom
+          );
 
-              const point =
-                getClientPoint(e.e);
+          /*
+           * IMPORTANT:
+           *
+           * Instead of blindly centering the source image,
+           * center the actual garment content.
+           */
+          const bounds =
+            contentBoundsRefs.current.get(
+              viewId
+            );
 
-              if (!point) {
-                return;
-              }
+          const garmentCenterX =
+            bounds?.centerX ??
+            worldW / 2;
 
-              const clientX =
-                point.clientX;
+          const garmentCenterY =
+            bounds?.centerY ??
+            worldH / 2;
 
-              const clientY =
-                point.clientY;
+          /*
+           * We want:
+           *
+           * garmentCenterX * zoom + panX = containerCenterX
+           *
+           * garmentCenterY * zoom + panY = containerCenterY
+           */
+          const panX =
+            cw / 2 -
+            garmentCenterX * zoom;
 
-              const vpt =
-                fc.viewportTransform;
+          const panY =
+            ch / 2 -
+            garmentCenterY * zoom;
 
-              if (!vpt) {
-                return;
-              }
+          fc.setViewportTransform([
+            zoom,
+            0,
+            0,
+            zoom,
+            panX,
+            panY,
+          ]);
 
-              vpt[4] +=
-                clientX - lastX;
+          fc.renderAll();
+        },
+        [syncCanvasVisibility]
+      );
 
-              vpt[5] +=
-                clientY - lastY;
+    const recenter =
+      useCallback(() => {
+        if (activeViewId) {
+          fitToContainer(
+            activeViewId
+          );
+        }
+      }, [
+        activeViewId,
+        fitToContainer,
+      ]);
 
-              fc.setViewportTransform(
-                vpt
+    /*
+     * ---------------------------------------------------------
+     * INITIALIZE ONE VIEW
+     * ---------------------------------------------------------
+     */
+    const initView =
+      useCallback(
+        async (view: EditorView) => {
+          /*
+           * Already initialized.
+           */
+          if (
+            fabricRefs.current.has(
+              view.viewId
+            ) ||
+            initializingRefs.current.has(
+              view.viewId
+            )
+          ) {
+            return;
+          }
+
+          const el =
+            canvasElRefs.current.get(
+              view.viewId
+            );
+
+          if (!el) {
+            return;
+          }
+
+          initializingRefs.current.add(
+            view.viewId
+          );
+
+          try {
+            const {
+              Canvas,
+              FabricImage,
+              Point,
+            } = await import("fabric");
+
+            const bgUrl =
+              cld(
+                view.publicId,
+                "full"
               );
 
-              lastX = clientX;
-              lastY = clientY;
+            const bgImg =
+              await FabricImage.fromURL(
+                bgUrl,
+                {
+                  crossOrigin:
+                    "anonymous",
+                }
+              );
 
-              fc.requestRenderAll();
+            const worldW =
+              bgImg.width!;
+
+            const worldH =
+              bgImg.height!;
+
+            /*
+             * Detect the actual garment position
+             * before creating the Fabric canvas.
+             */
+            let contentBounds:
+              ContentBounds | null =
+              null;
+
+            const sourceElement =
+              bgImg.getElement?.();
+
+            if (
+              sourceElement instanceof
+              HTMLImageElement
+            ) {
+              contentBounds =
+                detectContentBounds(
+                  sourceElement,
+                  worldW,
+                  worldH
+                );
             }
-          );
 
-          fc.on(
-            "mouse:up",
-            () => {
-              isPanning = false;
+            contentBoundsRefs.current.set(
+              view.viewId,
+              contentBounds
+            );
 
-              fc.selection = true;
-            }
-          );
+            const fc =
+              new Canvas(el, {
+                width: worldW,
+                height: worldH,
+                selection: true,
+                preserveObjectStacking:
+                  true,
+                backgroundColor:
+                  "#FFFFFF",
+              });
 
-          /**
-           * ───────────────────────────────
-           * Mouse wheel / trackpad zoom
-           * ───────────────────────────────
-           */
-          fc.on(
-            "mouse:wheel",
-            (opt: any) => {
-              const delta =
-                opt.e.deltaY;
+            bgImg.set({
+              left: 0,
+              top: 0,
+              selectable: false,
+              evented: false,
+              excludeFromExport: false,
+            });
 
-              let zoom =
-                fc.getZoom() *
-                0.999 ** delta;
+            fc.add(bgImg);
+            fc.sendObjectToBack(bgImg);
 
-              const fitZoom =
-                fitZoomRefs.current.get(
-                  view.viewId
-                ) ?? zoom;
+            const calibration =
+              computePxPerMm(
+                worldW,
+                worldH,
+                view.maxWidthMm,
+                view.maxHeightMm
+              );
 
-              zoom = Math.max(
-                fitZoom *
-                  MIN_ZOOM_MULT,
-                Math.min(
+            pxPerMmRefs.current.set(
+              view.viewId,
+              calibration?.avg ?? 0
+            );
+
+            /*
+             * -------------------------------------------------
+             * PAN
+             * -------------------------------------------------
+             */
+            let isPanning = false;
+
+            let lastX = 0;
+            let lastY = 0;
+
+            fc.on(
+              "mouse:down",
+              (e: any) => {
+                if (e.target) {
+                  return;
+                }
+
+                isPanning = true;
+                fc.selection = false;
+
+                lastX =
+                  e.e.clientX ??
+                  e.e.touches?.[0]
+                    ?.clientX ??
+                  0;
+
+                lastY =
+                  e.e.clientY ??
+                  e.e.touches?.[0]
+                    ?.clientY ??
+                  0;
+              }
+            );
+
+            fc.on(
+              "mouse:move",
+              (e: any) => {
+                if (!isPanning) {
+                  return;
+                }
+
+                const clientX =
+                  e.e.clientX ??
+                  e.e.touches?.[0]
+                    ?.clientX ??
+                  0;
+
+                const clientY =
+                  e.e.clientY ??
+                  e.e.touches?.[0]
+                    ?.clientY ??
+                  0;
+
+                const vpt =
+                  fc.viewportTransform;
+
+                vpt[4] +=
+                  clientX - lastX;
+
+                vpt[5] +=
+                  clientY - lastY;
+
+                fc.setViewportTransform(
+                  vpt
+                );
+
+                lastX = clientX;
+                lastY = clientY;
+
+                fc.requestRenderAll();
+              }
+            );
+
+            fc.on(
+              "mouse:up",
+              () => {
+                isPanning = false;
+                fc.selection = true;
+              }
+            );
+
+            /*
+             * -------------------------------------------------
+             * WHEEL ZOOM
+             * -------------------------------------------------
+             */
+            fc.on(
+              "mouse:wheel",
+              (opt: any) => {
+                const delta =
+                  opt.e.deltaY;
+
+                let zoom =
+                  fc.getZoom() *
+                  0.999 ** delta;
+
+                const fitZoom =
+                  fitZoomRefs.current.get(
+                    view.viewId
+                  ) ?? zoom;
+
+                zoom = Math.max(
                   fitZoom *
-                    MAX_ZOOM_MULT,
+                    MIN_ZOOM_MULT,
+                  Math.min(
+                    fitZoom *
+                      MAX_ZOOM_MULT,
+                    zoom
+                  )
+                );
+
+                fc.zoomToPoint(
+                  new Point(
+                    opt.e.offsetX,
+                    opt.e.offsetY
+                  ),
                   zoom
-                )
-              );
+                );
 
-              fc.zoomToPoint(
-                new Point(
-                  opt.e.offsetX,
-                  opt.e.offsetY
-                ),
-                zoom
-              );
-
-              opt.e.preventDefault();
-
-              opt.e.stopPropagation();
-            }
-          );
-
-          /**
-           * ───────────────────────────────
-           * Two-finger pinch-to-zoom
-           * ───────────────────────────────
-           */
-          let pinchStartDist = 0;
-
-          let pinchStartZoom = 1;
-
-          el.addEventListener(
-            "touchstart",
-            (e: TouchEvent) => {
-              if (
-                e.touches.length === 2
-              ) {
-                pinchStartDist =
-                  touchDistance(e);
-
-                pinchStartZoom =
-                  fc.getZoom();
+                opt.e.preventDefault();
+                opt.e.stopPropagation();
               }
-            },
-            {
-              passive: true,
-            }
-          );
+            );
 
-          el.addEventListener(
-            "touchmove",
-            (e: TouchEvent) => {
-              if (
-                e.touches.length === 2 &&
-                pinchStartDist > 0
-              ) {
+            /*
+             * -------------------------------------------------
+             * PINCH ZOOM
+             * -------------------------------------------------
+             */
+            let pinchStartDist = 0;
+            let pinchStartZoom = 1;
+
+            el.addEventListener(
+              "touchstart",
+              (e: TouchEvent) => {
+                if (
+                  e.touches.length === 2
+                ) {
+                  pinchStartDist =
+                    touchDistance(e);
+
+                  pinchStartZoom =
+                    fc.getZoom();
+                }
+              },
+              { passive: true }
+            );
+
+            el.addEventListener(
+              "touchmove",
+              (e: TouchEvent) => {
+                if (
+                  e.touches.length !== 2 ||
+                  pinchStartDist <= 0
+                ) {
+                  return;
+                }
+
                 const dist =
                   touchDistance(e);
 
@@ -903,18 +956,22 @@ export const EditorCanvas = forwardRef<
                   el.getBoundingClientRect();
 
                 const midX =
-                  (e.touches[0]
-                    .clientX +
+                  (
+                    e.touches[0]
+                      .clientX +
                     e.touches[1]
-                      .clientX) /
+                      .clientX
+                  ) /
                     2 -
                   rect.left;
 
                 const midY =
-                  (e.touches[0]
-                    .clientY +
+                  (
+                    e.touches[0]
+                      .clientY +
                     e.touches[1]
-                      .clientY) /
+                      .clientY
+                  ) /
                     2 -
                   rect.top;
 
@@ -925,399 +982,383 @@ export const EditorCanvas = forwardRef<
                   ),
                   zoom
                 );
+              },
+              { passive: true }
+            );
 
-                fc.requestRenderAll();
-              }
-            },
-            {
-              passive: true,
-            }
-          );
+            /*
+             * -------------------------------------------------
+             * DELETE TARGET
+             * -------------------------------------------------
+             */
+            fc.on(
+              "object:moving",
+              (e: any) => {
+                const obj =
+                  e.target;
 
-          /**
-           * ───────────────────────────────
-           * Accessory moving
-           * ───────────────────────────────
-           *
-           * While dragging an accessory:
-           *
-           * 1. Detect whether pointer is over Delete.
-           * 2. Tell EditorShell to highlight Delete.
-           */
-          fc.on(
-            "object:moving",
-            (e: any) => {
-              const obj =
-                e.target;
+                const placementId =
+                  getPlacementId(obj);
 
-              const placementId =
-                getPlacementId(obj);
-
-              if (!placementId) {
-                return;
-              }
-
-              const insideDeleteZone =
-                isPointerInsideDeleteZone(
-                  e.e
-                );
-
-              if (
-                insideDeleteZone !==
-                deleteTargetRef.current
-              ) {
-                deleteTargetRef.current =
-                  insideDeleteZone;
-
-                onDeleteTargetChange?.(
-                  insideDeleteZone
-                );
-              }
-            }
-          );
-
-          /**
-           * ───────────────────────────────
-           * Save position/rotation/scale
-           * ───────────────────────────────
-           *
-           * Fabric works in pixels.
-           *
-           * Zustand stores positions in mm.
-           */
-          fc.on(
-            "object:modified",
-            (e: any) => {
-              const obj =
-                e.target;
-
-              const placementId =
-                getPlacementId(obj);
-
-              if (!placementId) {
-                return;
-              }
-
-              const pxPerMm =
-                pxPerMmRefs.current.get(
-                  view.viewId
-                ) || 1;
-
-              updatePlacement(
-                placementId,
-                {
-                  xMm: pxToMm(
-                    obj.left!,
-                    pxPerMm
-                  ),
-
-                  yMm: pxToMm(
-                    obj.top!,
-                    pxPerMm
-                  ),
-
-                  rotation:
-                    obj.angle ?? 0,
-
-                  scaleX:
-                    obj.scaleX ?? 1,
-
-                  scaleY:
-                    obj.scaleY ?? 1,
+                if (!placementId) {
+                  return;
                 }
-              );
-            }
-          );
 
-          /**
-           * ───────────────────────────────
-           * Release accessory
-           * ───────────────────────────────
-           *
-           * If released over Delete,
-           * remove it from both Fabric and Zustand.
-           */
-          fc.on(
-            "mouse:up",
-            (e: any) => {
-              const activeObject =
-                fc.getActiveObject();
+                const insideDeleteZone =
+                  isPointerInsideDeleteZone(
+                    e.e
+                  );
 
-              const placementId =
-                getPlacementId(
-                  activeObject
+                if (
+                  insideDeleteZone !==
+                  deleteTargetRef.current
+                ) {
+                  deleteTargetRef.current =
+                    insideDeleteZone;
+
+                  onDeleteTargetChange?.(
+                    insideDeleteZone
+                  );
+                }
+              }
+            );
+
+            /*
+             * -------------------------------------------------
+             * SAVE OBJECT TRANSFORM
+             * -------------------------------------------------
+             */
+            fc.on(
+              "object:modified",
+              (e: any) => {
+                const obj =
+                  e.target;
+
+                const placementId =
+                  getPlacementId(obj);
+
+                if (!placementId) {
+                  return;
+                }
+
+                const pxPerMm =
+                  pxPerMmRefs.current.get(
+                    view.viewId
+                  ) || 1;
+
+                updatePlacement(
+                  placementId,
+                  {
+                    xMm: pxToMm(
+                      obj.left!,
+                      pxPerMm
+                    ),
+                    yMm: pxToMm(
+                      obj.top!,
+                      pxPerMm
+                    ),
+                    rotation:
+                      obj.angle ?? 0,
+                    scaleX:
+                      obj.scaleX ?? 1,
+                    scaleY:
+                      obj.scaleY ?? 1,
+                  }
                 );
+              }
+            );
 
-              /**
-               * Nothing selected.
-               */
-              if (!placementId) {
+            /*
+             * -------------------------------------------------
+             * DROP TO DELETE
+             * -------------------------------------------------
+             */
+            fc.on(
+              "mouse:up",
+              (e: any) => {
+                const activeObject =
+                  fc.getActiveObject();
+
+                const placementId =
+                  getPlacementId(
+                    activeObject
+                  );
+
+                if (!placementId) {
+                  deleteTargetRef.current =
+                    false;
+
+                  onDeleteTargetChange?.(
+                    false
+                  );
+
+                  return;
+                }
+
+                const shouldDelete =
+                  isPointerInsideDeleteZone(
+                    e.e
+                  );
+
+                if (shouldDelete) {
+                  deleteSelectedAccessory(
+                    fc
+                  );
+
+                  return;
+                }
+
                 deleteTargetRef.current =
                   false;
 
                 onDeleteTargetChange?.(
                   false
                 );
-
-                return;
               }
+            );
 
-              const shouldDelete =
-                isPointerInsideDeleteZone(
-                  e.e
+            /*
+             * -------------------------------------------------
+             * SCALE BOUNDS
+             * -------------------------------------------------
+             */
+            fc.on(
+              "object:scaling",
+              (e: any) => {
+                const obj =
+                  e.target;
+
+                const bounds =
+                  obj?.__sizeBoundsPx;
+
+                if (!bounds) {
+                  return;
+                }
+
+                const w =
+                  (obj.width ?? 0) *
+                  obj.scaleX;
+
+                const h =
+                  (obj.height ?? 0) *
+                  obj.scaleY;
+
+                if (
+                  w < bounds.minW
+                ) {
+                  obj.scaleX =
+                    bounds.minW /
+                    obj.width;
+                }
+
+                if (
+                  w > bounds.maxW
+                ) {
+                  obj.scaleX =
+                    bounds.maxW /
+                    obj.width;
+                }
+
+                if (
+                  h < bounds.minH
+                ) {
+                  obj.scaleY =
+                    bounds.minH /
+                    obj.height;
+                }
+
+                if (
+                  h > bounds.maxH
+                ) {
+                  obj.scaleY =
+                    bounds.maxH /
+                    obj.height;
+                }
+              }
+            );
+
+            fabricRefs.current.set(
+              view.viewId,
+              fc
+            );
+
+            fc.renderAll();
+
+            setReadyViewIds(
+              (prev) => {
+                const next =
+                  new Set(prev);
+
+                next.add(
+                  view.viewId
                 );
 
-              if (shouldDelete) {
-                deleteSelectedAccessory(
-                  fc
+                return next;
+              }
+            );
+
+            /*
+             * The newly-created Fabric wrapper
+             * must be explicitly shown/hidden.
+             */
+            syncCanvasVisibility(
+              activeViewId
+            );
+
+            /*
+             * Wait for the browser to finish
+             * laying out the canvas before fitting.
+             */
+            requestAnimationFrame(() => {
+              if (
+                activeViewId ===
+                view.viewId
+              ) {
+                fitToContainer(
+                  view.viewId
                 );
-
-                return;
               }
-
-              /**
-               * Normal release.
-               */
-              deleteTargetRef.current =
-                false;
-
-              onDeleteTargetChange?.(
-                false
-              );
-            }
-          );
-
-          /**
-           * ───────────────────────────────
-           * Bounded accessory scaling
-           * ───────────────────────────────
-           *
-           * Example:
-           * DTF stickers may resize between
-           * 60% and 160% of their nominal size.
-           */
-          fc.on(
-            "object:scaling",
-            (e: any) => {
-              const obj =
-                e.target;
-
-              const bounds =
-                obj?.__sizeBoundsPx;
-
-              if (!bounds) {
-                return;
-              }
-
-              const width =
-                (obj.width ?? 0) *
-                (obj.scaleX ?? 1);
-
-              const height =
-                (obj.height ?? 0) *
-                (obj.scaleY ?? 1);
-
-              if (
-                width < bounds.minW &&
-                obj.width
-              ) {
-                obj.scaleX =
-                  bounds.minW /
-                  obj.width;
-              }
-
-              if (
-                width > bounds.maxW &&
-                obj.width
-              ) {
-                obj.scaleX =
-                  bounds.maxW /
-                  obj.width;
-              }
-
-              if (
-                height < bounds.minH &&
-                obj.height
-              ) {
-                obj.scaleY =
-                  bounds.minH /
-                  obj.height;
-              }
-
-              if (
-                height > bounds.maxH &&
-                obj.height
-              ) {
-                obj.scaleY =
-                  bounds.maxH /
-                  obj.height;
-              }
-            }
-          );
-
-          /**
-           * Store Fabric canvas.
-           */
-          fabricRefs.current.set(
-            view.viewId,
-            fc
-          );
-
-          fc.renderAll();
-
-          /**
-           * Tell React this view is ready.
-           */
-          setReadyViewIds(
-            (prev) =>
-              new Set([
-                ...prev,
-                view.viewId,
-              ])
-          );
-
-          /**
-           * Fit after the browser has completed layout.
-           */
-          requestAnimationFrame(() => {
-            fitToContainer(
+            });
+          } finally {
+            initializingRefs.current.delete(
               view.viewId
             );
-          });
-        } catch (error) {
-          console.error(
-            `Failed to initialize editor view ${view.viewId}:`,
-            error
-          );
-        } finally {
-          initializingRefs.current.delete(
-            view.viewId
-          );
-        }
-      },
-      [
-        fitToContainer,
-        updatePlacement,
-        isPointerInsideDeleteZone,
-        deleteSelectedAccessory,
-        onDeleteTargetChange,
-      ]
-    );
+          }
+        },
+        [
+          activeViewId,
+          fitToContainer,
+          isPointerInsideDeleteZone,
+          onDeleteTargetChange,
+          deleteSelectedAccessory,
+          syncCanvasVisibility,
+          updatePlacement,
+        ]
+      );
 
-  /**
-   * Initialise the active view's canvas
-   * once its <canvas> element exists.
-   */
-  useEffect(() => {
-    const view = views.find(
-      (v) =>
-        v.viewId === activeViewId
-    );
-
-    if (view) {
-      void initView(view);
-    }
-  }, [
-    activeViewId,
-    views,
-    initView,
-  ]);
-
-  /**
-   * Re-fit the active canvas whenever
-   * the editor container changes size.
-   *
-   * This handles:
-   *
-   * - Browser resize
-   * - Mobile rotation
-   * - Footer/header size changes
-   * - Desktop window resize
-   */
-  useEffect(() => {
-    const container =
-      containerRef.current;
-
-    if (!container) {
-      return;
-    }
-
-    const ro =
-      new ResizeObserver(() => {
-        if (activeViewId) {
-          fitToContainer(
+    /*
+     * ---------------------------------------------------------
+     * ACTIVE VIEW INITIALIZATION
+     * ---------------------------------------------------------
+     */
+    useEffect(() => {
+      const view =
+        views.find(
+          (v) =>
+            v.viewId ===
             activeViewId
-          );
-        }
-      });
+        );
 
-    ro.observe(container);
-
-    return () =>
-      ro.disconnect();
-  }, [
-    activeViewId,
-    fitToContainer,
-  ]);
-
-  /**
-   * Render placements that exist in Zustand
-   * but haven't been rendered into Fabric yet.
-   *
-   * This handles:
-   *
-   * - Existing saved designs
-   * - Switching views
-   * - Delayed accessory catalogue loading
-   */
-  useEffect(() => {
-    let cancelled = false;
-
-    async function renderPlacements() {
-      const {
-        FabricImage,
-      } = await import("fabric");
-
-      if (cancelled) {
+      if (!view) {
         return;
       }
 
-      for (const placement of placements) {
-        if (
-          renderedPlacementIds.current.has(
-            placement.placementId
-          )
+      /*
+       * Immediately hide old Fabric canvases.
+       */
+      syncCanvasVisibility(
+        activeViewId
+      );
+
+      /*
+       * Initialize the new view if necessary.
+       */
+      initView(view).then(() => {
+        syncCanvasVisibility(
+          activeViewId
+        );
+
+        requestAnimationFrame(() => {
+          fitToContainer(
+            activeViewId
+          );
+        });
+      });
+    }, [
+      activeViewId,
+      views,
+      initView,
+      syncCanvasVisibility,
+      fitToContainer,
+    ]);
+
+    /*
+     * ---------------------------------------------------------
+     * RESPONSIVE REFIT
+     * ---------------------------------------------------------
+     */
+    useEffect(() => {
+      const container =
+        containerRef.current;
+
+      if (!container) {
+        return;
+      }
+
+      const ro =
+        new ResizeObserver(() => {
+          if (activeViewId) {
+            fitToContainer(
+              activeViewId
+            );
+          }
+        });
+
+      ro.observe(container);
+
+      return () => {
+        ro.disconnect();
+      };
+    }, [
+      activeViewId,
+      fitToContainer,
+    ]);
+
+    /*
+     * ---------------------------------------------------------
+     * RESTORE PLACEMENTS
+     * ---------------------------------------------------------
+     */
+    useEffect(() => {
+      async function renderPlacements() {
+        const {
+          FabricImage,
+        } = await import("fabric");
+
+        for (
+          const placement of placements
         ) {
-          continue;
-        }
+          if (
+            renderedPlacementIds.current.has(
+              placement.placementId
+            )
+          ) {
+            continue;
+          }
 
-        const viewId =
-          placement.viewId as unknown as string;
+          const fc =
+            fabricRefs.current.get(
+              placement.viewId
+            );
 
-        const fc =
-          fabricRefs.current.get(
-            viewId
-          );
+          if (!fc) {
+            continue;
+          }
 
-        if (!fc) {
-          continue;
-        }
+          const accessory =
+            accessoryLookup.get(
+              placement.accessoryId
+            );
 
-        const accessory =
-          accessoryLookup.get(
-            placement.accessoryId as unknown as string
-          );
+          if (!accessory) {
+            continue;
+          }
 
-        if (!accessory) {
-          continue;
-        }
+          const pxPerMm =
+            pxPerMmRefs.current.get(
+              placement.viewId
+            ) || 1;
 
-        const pxPerMm =
-          pxPerMmRefs.current.get(
-            viewId
-          ) || 1;
-
-        try {
           const img =
             await FabricImage.fromURL(
               accessory.cutoutUrl,
@@ -1327,70 +1368,34 @@ export const EditorCanvas = forwardRef<
               }
             );
 
-          if (cancelled) {
-            return;
-          }
-
-          /**
-           * It is possible the placement was removed
-           * while its image was loading.
-           *
-           * Don't put it back onto the canvas.
-           */
-          const stillExists =
-            placements.some(
-              (item) =>
-                item.placementId ===
-                placement.placementId
-            );
-
-          if (!stillExists) {
-            continue;
-          }
-
           img.set({
             left: mmToPx(
               placement.xMm,
               pxPerMm
             ),
-
             top: mmToPx(
               placement.yMm,
               pxPerMm
             ),
-
             angle:
               placement.rotation,
-
             scaleX:
               placement.scaleX,
-
             scaleY:
               placement.scaleY,
 
             cornerStyle:
               "circle",
-
             cornerColor:
               "#F7FD04",
-
             borderColor:
               "#0A0A0A",
-
             cornerSize: 10,
-
             transparentCorners:
               false,
 
-            /**
-             * Custom Fabric runtime properties.
-             *
-             * The `as any` is intentional here because
-             * Fabric does not declare these custom fields.
-             */
             placementId:
               placement.placementId,
-
             accessoryId:
               placement.accessoryId,
           } as any);
@@ -1403,391 +1408,289 @@ export const EditorCanvas = forwardRef<
           );
 
           fc.add(img);
-
-          /**
-           * Restore stacking order.
-           *
-           * Background is object 0, so accessories
-           * are added above it.
-           */
           fc.renderAll();
 
           renderedPlacementIds.current.add(
             placement.placementId
           );
-        } catch (error) {
-          console.error(
-            "Failed to restore accessory placement:",
-            error
-          );
         }
       }
-    }
 
-    void renderPlacements();
+      renderPlacements();
+    }, [
+      placements,
+      readyViewIds,
+      accessoryLookup,
+    ]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    placements,
-    readyViewIds,
-    accessoryLookup,
-  ]);
+    /*
+     * ---------------------------------------------------------
+     * ADD ACCESSORY
+     * ---------------------------------------------------------
+     */
+    const addAccessoryToCanvas =
+      useCallback(
+        async (
+          accessory: AccessoryForCanvas
+        ) => {
+          const {
+            FabricImage,
+          } = await import("fabric");
 
-  /**
-   * ─────────────────────────────────────
-   * Add a NEW accessory
-   * ─────────────────────────────────────
-   */
-  const addAccessoryToCanvas =
-    useCallback(
-      async (
-        accessory: AccessoryForCanvas
-      ) => {
-        const {
-          FabricImage,
-        } = await import("fabric");
+          const fc =
+            fabricRefs.current.get(
+              activeViewId
+            );
 
-        const fc =
-          fabricRefs.current.get(
-            activeViewId
-          );
+          if (!fc) {
+            return;
+          }
 
-        if (!fc) {
-          return;
-        }
+          const pxPerMm =
+            pxPerMmRefs.current.get(
+              activeViewId
+            );
 
-        const pxPerMm =
-          pxPerMmRefs.current.get(
-            activeViewId
-          );
+          const img =
+            await FabricImage.fromURL(
+              accessory.cutoutUrl,
+              {
+                crossOrigin:
+                  "anonymous",
+              }
+            );
 
-        const img =
-          await FabricImage.fromURL(
-            accessory.cutoutUrl,
-            {
-              crossOrigin:
-                "anonymous",
-            }
-          );
+          let scaleX: number;
+          let scaleY: number;
 
-        let scaleX: number;
-        let scaleY: number;
-
-        if (pxPerMm) {
-          /**
-           * True-to-life physical size.
-           */
-          scaleX =
-            mmToPx(
-              accessory.widthMm,
-              pxPerMm
-            ) /
-            img.width!;
-
-          scaleY =
-            mmToPx(
-              accessory.heightMm,
-              pxPerMm
-            ) /
-            img.height!;
-        } else {
-          /**
-           * Legacy/unmeasured view fallback.
-           */
-          const worldW =
-            fc.getWidth();
-
-          scaleX =
-            (worldW * 0.2) /
-            img.width!;
-
-          scaleY = scaleX;
-        }
-
-        /**
-         * Centre accessory in world space.
-         */
-        const left =
-          fc.getWidth() / 2 -
-          (img.width! *
-            scaleX) /
-            2;
-
-        const top =
-          fc.getHeight() / 2 -
-          (img.height! *
-            scaleY) /
-            2;
-
-        /**
-         * Generate unique placement ID.
-         */
-        const placementId =
-          globalThis.crypto
-            ?.randomUUID?.() ??
-          `p_${Date.now()}_${Math.random()
-            .toString(36)
-            .slice(2)}`;
-
-        /**
-         * Add custom runtime properties.
-         *
-         * `as any` is intentional because these
-         * properties belong to our editor, not Fabric.
-         */
-        img.set({
-          left,
-          top,
-          scaleX,
-          scaleY,
-
-          placementId,
-
-          accessoryId:
-            accessory.id,
-        } as any);
-
-        applyLockOrBounds(
-          img,
-          accessory.type,
-          pxPerMm ?? 1,
-          accessory
-        );
-
-        /**
-         * Add to Fabric.
-         */
-        fc.add(img);
-
-        fc.setActiveObject(img);
-
-        fc.renderAll();
-
-        /**
-         * Add to Zustand.
-         */
-        addPlacement({
-          placementId,
-
-          accessoryId:
-            accessory.id as any,
-
-          viewId:
-            activeViewId as any,
-
-          xMm: pxPerMm
-            ? pxToMm(
-                left,
+          if (pxPerMm) {
+            scaleX =
+              mmToPx(
+                accessory.widthMm,
                 pxPerMm
-              )
-            : 0,
+              ) /
+              img.width!;
 
-          yMm: pxPerMm
-            ? pxToMm(
-                top,
+            scaleY =
+              mmToPx(
+                accessory.heightMm,
                 pxPerMm
-              )
-            : 0,
+              ) /
+              img.height!;
+          } else {
+            const worldW =
+              fc.getWidth();
 
-          rotation: 0,
+            scaleX =
+              scaleY =
+                (worldW * 0.2) /
+                img.width!;
+          }
 
-          scaleX,
+          const left =
+            fc.getWidth() / 2 -
+            (img.width! *
+              scaleX) /
+              2;
 
-          scaleY,
+          const top =
+            fc.getHeight() / 2 -
+            (img.height! *
+              scaleY) /
+              2;
 
-          zIndex:
-            fc.getObjects()
-              .length,
-        });
+          const placementId =
+            globalThis.crypto?.randomUUID?.() ??
+            `p_${Date.now()}_${Math.random()
+              .toString(36)
+              .slice(2)}`;
 
-        /**
-         * Mark as already rendered.
-         */
-        renderedPlacementIds.current.add(
-          placementId
-        );
-      },
+          img.set({
+            left,
+            top,
+            scaleX,
+            scaleY,
+            placementId,
+            accessoryId:
+              accessory.id,
+          } as any);
+
+          applyLockOrBounds(
+            img,
+            accessory.type,
+            pxPerMm ?? 1,
+            accessory
+          );
+
+          fc.add(img);
+          fc.setActiveObject(img);
+          fc.renderAll();
+
+          addPlacement({
+            placementId,
+            accessoryId:
+              accessory.id as any,
+            viewId:
+              activeViewId as any,
+            xMm: pxPerMm
+              ? pxToMm(
+                  left,
+                  pxPerMm
+                )
+              : 0,
+            yMm: pxPerMm
+              ? pxToMm(
+                  top,
+                  pxPerMm
+                )
+              : 0,
+            rotation: 0,
+            scaleX,
+            scaleY,
+            zIndex:
+              fc.getObjects()
+                .length,
+          });
+
+          renderedPlacementIds.current.add(
+            placementId
+          );
+        },
+        [
+          activeViewId,
+          addPlacement,
+        ]
+      );
+
+    /*
+     * ---------------------------------------------------------
+     * EXPORT
+     * ---------------------------------------------------------
+     */
+    const exportPNG =
+      useCallback(
+        async (
+          viewId: string
+        ): Promise<Blob | null> => {
+          const fc =
+            fabricRefs.current.get(
+              viewId
+            );
+
+          if (!fc) {
+            return null;
+          }
+
+          const prevVpt =
+            fc.viewportTransform;
+
+          fc.setViewportTransform([
+            1,
+            0,
+            0,
+            1,
+            0,
+            0,
+          ]);
+
+          fc.renderAll();
+
+          const dataUrl =
+            fc.toDataURL({
+              format: "jpeg",
+              quality: 0.85,
+              multiplier: 1,
+            });
+
+          fc.setViewportTransform(
+            prevVpt
+          );
+
+          fc.renderAll();
+
+          return fetch(dataUrl)
+            .then((r) =>
+              r.blob()
+            )
+            .catch(() => null);
+        },
+        []
+      );
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        exportPNG,
+        addAccessoryToCanvas,
+        recenter,
+      }),
       [
-        activeViewId,
-        addPlacement,
+        exportPNG,
+        addAccessoryToCanvas,
+        recenter,
       ]
     );
 
-  /**
-   * ─────────────────────────────────────
-   * Export view
-   * ─────────────────────────────────────
-   *
-   * Export ignores current zoom/pan.
-   *
-   * It exports the actual world-space canvas.
-   */
-  const exportPNG =
-    useCallback(
-      async (
-        viewId: string
-      ): Promise<Blob | null> => {
-        const fc =
-          fabricRefs.current.get(
-            viewId
-          );
-
-        if (!fc) {
-          return null;
-        }
-
-        /**
-         * Preserve current viewport.
-         */
-        const prevVpt =
-          fc.viewportTransform;
-
-        /**
-         * Reset to world-space 1:1.
-         */
-        fc.setViewportTransform([
-          1,
-          0,
-          0,
-          1,
-          0,
-          0,
-        ]);
-
-        fc.renderAll();
-
-        /**
-         * Export.
-         *
-         * NOTE:
-         * Despite the existing function name `exportPNG`,
-         * your current implementation exports JPEG.
-         * This is intentionally preserved so the rest of
-         * your EditorShell does not need to change.
-         */
-        const dataUrl =
-          fc.toDataURL({
-            format: "jpeg",
-            quality: 0.85,
-            multiplier: 1,
-          });
-
-        /**
-         * Restore viewport.
-         */
-        fc.setViewportTransform(
-          prevVpt
-        );
-
-        fc.renderAll();
-
-        return fetch(dataUrl)
-          .then((response) =>
-            response.blob()
-          )
-          .catch(() => null);
-      },
-      []
-    );
-
-  /**
-   * Expose imperative methods to EditorShell.
-   */
-  useImperativeHandle(
-    ref,
-    () => ({
-      exportPNG,
-      addAccessoryToCanvas,
-      recenter,
-    }),
-    [
-      exportPNG,
-      addAccessoryToCanvas,
-      recenter,
-    ]
-  );
-
-  /**
-   * ─────────────────────────────────────
-   * Render
-   * ─────────────────────────────────────
-   *
-   * IMPORTANT:
-   *
-   * `w-full h-full` is intentional.
-   *
-   * EditorShell owns the overall 100dvh layout.
-   * EditorCanvas simply fills the middle area.
-   */
-  return (
-    <div
-      ref={containerRef}
-      className="
-        relative
-        w-full
-        h-full
-        min-h-0
-        min-w-0
-        bg-white
-        overflow-hidden
-        touch-none
-      "
-    >
-      {views.map((view) => (
-        <canvas
-          key={view.viewId}
-          ref={setCanvasElRef(
-            view.viewId
-          )}
-          className="
-            absolute
-            left-0
-            top-0
-            block
-          "
-          style={{
-            display:
-              activeViewId ===
-              view.viewId
-                ? "block"
-                : "none",
-          }}
-        />
-      ))}
-
-      {/* Re-centre button */}
-      <button
-        type="button"
-        onClick={recenter}
-        aria-label="Re-centre"
+    return (
+      <div
+        ref={containerRef}
         className="
-          absolute
-          bottom-3
-          right-3
-          sm:bottom-4
-          sm:right-4
-          z-20
-          w-10
-          h-10
-          flex
-          items-center
-          justify-center
+          relative
+          w-full
+          h-full
+          min-h-0
+          min-w-0
           bg-white
-          border
-          border-black
-          rounded-full
-          shadow-sm
-          active:scale-95
-          transition-transform
+          overflow-hidden
+          touch-none
         "
       >
-        <RefreshCw
-          size={18}
-          strokeWidth={2}
-        />
-      </button>
-    </div>
-  );
-});
+        {views.map((view) => (
+          <canvas
+            key={view.viewId}
+            ref={setCanvasElRef(
+              view.viewId
+            )}
+            className="
+              absolute
+              left-0
+              top-0
+              block
+            "
+          />
+        ))}
+
+        <button
+          type="button"
+          onClick={recenter}
+          aria-label="Re-centre"
+          className="
+            absolute
+            bottom-3
+            right-3
+            sm:bottom-4
+            sm:right-4
+            z-20
+            w-10
+            h-10
+            flex
+            items-center
+            justify-center
+            bg-white
+            border
+            border-black
+            rounded-full
+            shadow-sm
+            active:scale-95
+            transition-transform
+          "
+        >
+          <RefreshCw
+            size={18}
+            strokeWidth={2}
+          />
+        </button>
+      </div>
+    );
+  }
+);
